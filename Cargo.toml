@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "smart-env-vault",
+    "smart-env-cli"
+]
+resolver = "2"

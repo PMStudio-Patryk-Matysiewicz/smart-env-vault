@@ -1,1 +1,0 @@
-pub enum KeyError { Unwrap, InvalidRecoveryKey, KeychainUnavailable, Storage, WrongPassphrase }

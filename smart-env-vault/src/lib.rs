@@ -1,3 +1,15 @@
+//! Client-side encrypted secret store for `smart-env`.
+//!
+//! Key model (ADR-001):
+//!
+//! ```text
+//! DeviceKey (X25519, keychain) ──┐
+//!                                ├─ wrap ──> Dek per environment ── AES-256-GCM + Aad ──> secret values
+//! RecoveryKey ───────────────────┘
+//! ```
+//!
+//! Entry point: [`Vault`]. The database holds only ciphertext and wrapped keys.
+
 mod dek;
 mod device;
 mod error;

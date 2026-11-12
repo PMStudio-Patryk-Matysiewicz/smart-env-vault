@@ -3,9 +3,17 @@ use age::x25519;
 use secrecy::{ExposeSecret, SecretString};
 use std::str::FromStr;
 
+/// Private X25519 key of this device (`age` identity).
+///
+/// Generated locally and kept in the system keychain (see [`KeyStore`](crate::KeyStore));
+/// the private part never leaves the device. Opens [`WrappedDek`](crate::WrappedDek)s
+/// via [`Unwrapper`](crate::Unwrapper). `Debug` shows only the public part.
 #[derive(Clone)]
 pub struct DeviceKey(x25519::Identity);
 
+/// Public half of a [`DeviceKey`] or [`RecoveryKey`](crate::RecoveryKey) (`age1...`).
+///
+/// Not secret: used as a recipient in [`Dek::wrap`](crate::Dek::wrap).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicKey(x25519::Recipient);
 
@@ -16,20 +24,28 @@ impl PublicKey {
 }
 
 impl DeviceKey {
+    /// Generates a new random device key.
     pub fn generate() -> Self {
         Self(x25519::Identity::generate())
     }
 
+    /// Restores a key from its text form (`AGE-SECRET-KEY-1...`), e.g. read from the keychain.
+    ///
+    /// # Errors
+    /// [`KeyError::InvalidDeviceKey`] if the text is not a valid key.
     pub fn from_secret(secret: &SecretString) -> Result<Self, KeyError> {
         x25519::Identity::from_str(secret.expose_secret())
             .map(Self)
             .map_err(|_| KeyError::InvalidDeviceKey)
     }
 
+    /// Text form of the private key, for saving in a [`KeyStore`](crate::KeyStore).
+    /// Wrapped in [`SecretString`], so it is wiped on drop and hidden in `Debug`.
     pub fn to_secret(&self) -> SecretString {
         self.0.to_string()
     }
 
+    /// The public key to wrap DEKs for this device.
     pub fn public(&self) -> PublicKey {
         PublicKey(self.0.to_public())
     }

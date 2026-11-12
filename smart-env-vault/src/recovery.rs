@@ -3,21 +3,34 @@ use age::x25519;
 use secrecy::{ExposeSecret, SecretString};
 use std::str::FromStr;
 
+/// Recovery key: a second private key that can open every DEK.
+///
+/// Shown to the user once at `init` and kept outside the device (e.g. in a
+/// password manager). Restores access on a new machine after losing the
+/// device key. `Debug` prints `RecoveryKey(..)`.
 pub struct RecoveryKey(x25519::Identity);
 
 impl RecoveryKey {
+    /// Generates a new key and returns it together with its text form to
+    /// show to the user (only once).
     pub fn generate() -> (Self, SecretString) {
         let key = Self(x25519::Identity::generate());
         let text = key.0.to_string();
         (key, text)
     }
 
+    /// Parses a key typed or pasted by the user. Surrounding whitespace is
+    /// ignored; the built-in checksum rejects typos.
+    ///
+    /// # Errors
+    /// [`KeyError::InvalidRecoveryKey`] if the text is malformed or has a typo.
     pub fn parse(text: &SecretString) -> Result<Self, KeyError> {
         x25519::Identity::from_str(text.expose_secret().trim())
             .map(Self)
             .map_err(|_| KeyError::InvalidRecoveryKey)
     }
 
+    /// The public key to wrap every DEK for recovery.
     pub fn public(&self) -> crate::PublicKey {
         crate::PublicKey::from_recipient(self.0.to_public())
     }

@@ -5,12 +5,20 @@ use std::{
     sync::Mutex,
 };
 
+/// Persistent storage for the [`DeviceKey`].
+///
+/// Implementations: [`KeychainStore`] (default), [`PassphraseFileStore`]
+/// (headless fallback), [`MemoryStore`] (tests).
 pub trait KeyStore {
+    /// Loads the saved key; `Ok(None)` if nothing has been saved yet.
     fn load(&self) -> Result<Option<DeviceKey>, KeyError>;
+    /// Saves the key, replacing any previous one.
     fn save(&self, key: &DeviceKey) -> Result<(), KeyError>;
+    /// Removes the saved key. Succeeds if there was nothing to remove.
     fn delete(&self) -> Result<(), KeyError>;
 }
 
+/// In-memory [`KeyStore`] for tests. Lost when the process ends.
 #[derive(Default)]
 pub struct MemoryStore {
     key: Mutex<Option<secrecy::SecretString>>,
@@ -37,11 +45,16 @@ impl KeyStore for MemoryStore {
     }
 }
 
+/// [`KeyStore`] backed by the system keychain: macOS Keychain, Windows
+/// Credential Manager or Linux Secret Service (via the `keyring` crate).
+///
+/// Lets daily work happen without a password prompt.
 pub struct KeychainStore {
     username: String,
 }
 
 impl KeychainStore {
+    /// Creates a store for the keychain entry `smart-env-vault` / `username`.
     pub fn new(username: String) -> Self {
         Self { username }
     }
@@ -77,12 +90,16 @@ impl KeyStore for KeychainStore {
     }
 }
 
+/// Fallback [`KeyStore`] for machines without a keychain (headless Linux, SSH):
+/// the key is kept in a file encrypted with a passphrase (`age` scrypt).
 pub struct PassphraseFileStore {
     path: PathBuf,
     passphrase: SecretString,
 }
 
 impl PassphraseFileStore {
+    /// Creates a store for the file at `path`, protected by `passphrase`.
+    /// Nothing is read or written until the first call.
     pub fn new(path: impl Into<PathBuf>, passphrase: SecretString) -> Self {
         Self {
             path: path.into(),

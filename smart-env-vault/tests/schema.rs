@@ -21,7 +21,8 @@ fn open() -> Connection {
 /// Vault -> project "payments" -> env "dev" with active DEK v1 -> secret DATABASE_URL.
 fn seeded() -> Connection {
     let db = open();
-    db.execute("INSERT INTO vaults (id) VALUES (?1)", [VAULT]).unwrap();
+    db.execute("INSERT INTO vaults (id) VALUES (?1)", [VAULT])
+        .unwrap();
     db.execute(
         "INSERT INTO projects (id, vault_id, name) VALUES (?1, ?2, 'payments')",
         [PROJECT, VAULT],
@@ -66,8 +67,10 @@ fn assert_constraint(result: rusqlite::Result<usize>) {
 }
 
 fn count(db: &Connection, table: &str) -> i64 {
-    db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))
-        .unwrap()
+    db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+        row.get(0)
+    })
+    .unwrap()
 }
 
 #[test]
@@ -79,10 +82,7 @@ fn ids_must_be_16_byte_blobs() {
 #[test]
 fn strict_tables_reject_text_in_blob_columns() {
     let db = open();
-    assert_constraint(db.execute(
-        "INSERT INTO vaults (id) VALUES ('0123456789abcdef')",
-        [],
-    ));
+    assert_constraint(db.execute("INSERT INTO vaults (id) VALUES ('0123456789abcdef')", []));
 }
 
 #[test]
@@ -169,20 +169,35 @@ fn secret_must_reference_existing_dek_version() {
 #[test]
 fn secret_names_follow_posix_rules() {
     let db = seeded();
-    for bad in ["", "1ABC", "MY-KEY", "WITH SPACE", "ZAŻÓŁĆ", &"A".repeat(256)] {
+    for bad in [
+        "",
+        "1ABC",
+        "MY-KEY",
+        "WITH SPACE",
+        "ZAŻÓŁĆ",
+        &"A".repeat(256),
+    ] {
         assert_constraint(insert_secret(&db, id(9), bad, 1, &[0; 12], &[0; 20]));
     }
     for good in ["A", "_PRIVATE", "api_key_2", &"A".repeat(255)] {
         let key_id = id(10 + good.len() as u8 % 200);
         insert_secret(&db, key_id, good, 1, &[0; 12], &[0; 20]).unwrap();
-        db.execute("DELETE FROM secrets WHERE key_id = ?1", [key_id]).unwrap();
+        db.execute("DELETE FROM secrets WHERE key_id = ?1", [key_id])
+            .unwrap();
     }
 }
 
 #[test]
 fn secret_names_are_unique_per_environment() {
     let db = seeded();
-    assert_constraint(insert_secret(&db, id(9), "DATABASE_URL", 1, &[0; 12], &[0; 20]));
+    assert_constraint(insert_secret(
+        &db,
+        id(9),
+        "DATABASE_URL",
+        1,
+        &[0; 12],
+        &[0; 20],
+    ));
 }
 
 #[test]
@@ -196,19 +211,31 @@ fn nonce_must_be_96_bits() {
 fn ciphertext_holds_gcm_tag_and_at_most_64_kib() {
     let db = seeded();
     assert_constraint(insert_secret(&db, id(9), "A", 1, &[0; 12], &[0; 15]));
-    assert_constraint(insert_secret(&db, id(9), "A", 1, &[0; 12], &vec![0; 16 + 65_537]));
+    assert_constraint(insert_secret(
+        &db,
+        id(9),
+        "A",
+        1,
+        &[0; 12],
+        &vec![0; 16 + 65_537],
+    ));
     insert_secret(&db, id(9), "A", 1, &[0; 12], &vec![0; 16 + 65_536]).unwrap();
 }
 
 #[test]
 fn rename_keeps_key_id() {
     let db = seeded();
-    db.execute("UPDATE secrets SET name = 'DB_URL' WHERE key_id = ?1", [KEY])
-        .unwrap();
+    db.execute(
+        "UPDATE secrets SET name = 'DB_URL' WHERE key_id = ?1",
+        [KEY],
+    )
+    .unwrap();
     let key_id: [u8; 16] = db
-        .query_row("SELECT key_id FROM secrets WHERE name = 'DB_URL'", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT key_id FROM secrets WHERE name = 'DB_URL'",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(key_id, KEY);
 }
@@ -216,7 +243,8 @@ fn rename_keeps_key_id() {
 #[test]
 fn deleting_vault_cascades_to_everything() {
     let db = seeded();
-    db.execute("DELETE FROM vaults WHERE id = ?1", [VAULT]).unwrap();
+    db.execute("DELETE FROM vaults WHERE id = ?1", [VAULT])
+        .unwrap();
     for table in ["projects", "environments", "environment_deks", "secrets"] {
         assert_eq!(count(&db, table), 0, "{table} not emptied");
     }

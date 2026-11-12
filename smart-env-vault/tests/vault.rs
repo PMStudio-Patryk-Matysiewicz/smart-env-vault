@@ -103,7 +103,10 @@ fn reseal(path: &Path, env: EnvironmentId, var: &str, (nonce, ciphertext): &(Vec
 fn create_makes_file_readable_only_by_owner() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = setup();
-    let mode = std::fs::metadata(&fixture.path).unwrap().permissions().mode();
+    let mode = std::fs::metadata(&fixture.path)
+        .unwrap()
+        .permissions()
+        .mode();
     assert_eq!(mode & 0o777, 0o600);
 }
 
@@ -112,7 +115,10 @@ fn create_refuses_existing_file() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("vault.db");
     std::fs::write(&path, "keep").unwrap();
-    assert!(matches!(err(Vault::create(&path)), VaultError::AlreadyExists));
+    assert!(matches!(
+        err(Vault::create(&path)),
+        VaultError::AlreadyExists
+    ));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep");
 }
 
@@ -137,7 +143,10 @@ fn open_rejects_non_vault_file() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("vault.db");
     std::fs::write(&path, "hello").unwrap();
-    assert!(matches!(err(Vault::open(&path)), VaultError::UnsupportedSchema));
+    assert!(matches!(
+        err(Vault::open(&path)),
+        VaultError::UnsupportedSchema
+    ));
 }
 
 #[test]
@@ -176,7 +185,9 @@ fn set_then_get_round_trips() {
         ("EMPTY", ""),
         ("BIG", big.as_str()),
     ] {
-        f.vault.set(f.env, &name(var), &value(text), &f.device).unwrap();
+        f.vault
+            .set(f.env, &name(var), &value(text), &f.device)
+            .unwrap();
         let back = f.vault.get(f.env, &name(var), &f.device).unwrap().unwrap();
         assert_eq!(back.expose(), text, "{var}");
     }
@@ -185,15 +196,26 @@ fn set_then_get_round_trips() {
 #[test]
 fn get_missing_returns_none() {
     let f = setup();
-    assert!(f.vault.get(f.env, &name("NOPE"), &f.device).unwrap().is_none());
+    assert!(
+        f.vault
+            .get(f.env, &name("NOPE"), &f.device)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
 fn overwrite_keeps_key_id_and_changes_nonce() {
     let mut f = setup();
-    let first = f.vault.set(f.env, &name("A"), &value("v"), &f.device).unwrap();
+    let first = f
+        .vault
+        .set(f.env, &name("A"), &value("v"), &f.device)
+        .unwrap();
     let before = sealed(&f.path, f.env, "A");
-    let second = f.vault.set(f.env, &name("A"), &value("v"), &f.device).unwrap();
+    let second = f
+        .vault
+        .set(f.env, &name("A"), &value("v"), &f.device)
+        .unwrap();
     let after = sealed(&f.path, f.env, "A");
     assert_eq!(first, second);
     assert_ne!(before.0, after.0);
@@ -203,15 +225,23 @@ fn overwrite_keeps_key_id_and_changes_nonce() {
 #[test]
 fn recovery_key_reads_what_device_wrote() {
     let mut f = setup();
-    f.vault.set(f.env, &name("A"), &value("v"), &f.device).unwrap();
-    let back = f.vault.get(f.env, &name("A"), &f.recovery).unwrap().unwrap();
+    f.vault
+        .set(f.env, &name("A"), &value("v"), &f.device)
+        .unwrap();
+    let back = f
+        .vault
+        .get(f.env, &name("A"), &f.recovery)
+        .unwrap()
+        .unwrap();
     assert_eq!(back.expose(), "v");
 }
 
 #[test]
 fn wrong_key_cannot_read() {
     let mut f = setup();
-    f.vault.set(f.env, &name("A"), &value("v"), &f.device).unwrap();
+    f.vault
+        .set(f.env, &name("A"), &value("v"), &f.device)
+        .unwrap();
     let result = f.vault.get(f.env, &name("A"), &DeviceKey::generate());
     assert!(matches!(err(result), VaultError::Key(KeyError::Unwrap)));
 }
@@ -219,13 +249,18 @@ fn wrong_key_cannot_read() {
 #[test]
 fn wrong_key_write_changes_nothing() {
     let mut f = setup();
-    f.vault.set(f.env, &name("A"), &value("v"), &f.device).unwrap();
+    f.vault
+        .set(f.env, &name("A"), &value("v"), &f.device)
+        .unwrap();
     let before = rows(&f.path);
     let intruder = DeviceKey::generate();
 
     for var in ["A", "NEW"] {
         let result = f.vault.set(f.env, &name(var), &value("evil"), &intruder);
-        assert!(matches!(err(result), VaultError::Key(KeyError::Unwrap)), "{var}");
+        assert!(
+            matches!(err(result), VaultError::Key(KeyError::Unwrap)),
+            "{var}"
+        );
     }
     assert_eq!(rows(&f.path), before);
 }
@@ -233,14 +268,21 @@ fn wrong_key_write_changes_nothing() {
 #[test]
 fn ciphertext_swapped_between_keys_fails() {
     let mut f = setup();
-    f.vault.set(f.env, &name("A"), &value("a"), &f.device).unwrap();
-    f.vault.set(f.env, &name("B"), &value("b"), &f.device).unwrap();
+    f.vault
+        .set(f.env, &name("A"), &value("a"), &f.device)
+        .unwrap();
+    f.vault
+        .set(f.env, &name("B"), &value("b"), &f.device)
+        .unwrap();
     let (a, b) = (sealed(&f.path, f.env, "A"), sealed(&f.path, f.env, "B"));
     reseal(&f.path, f.env, "A", &b);
     reseal(&f.path, f.env, "B", &a);
 
     let result = f.vault.get(f.env, &name("A"), &f.device);
-    assert!(matches!(err(result), VaultError::Secret(SecretError::Decrypt)));
+    assert!(matches!(
+        err(result),
+        VaultError::Secret(SecretError::Decrypt)
+    ));
 }
 
 #[test]
@@ -255,12 +297,19 @@ fn ciphertext_moved_to_other_environment_fails() {
             &[&f.device.public(), &f.recovery.public()],
         )
         .unwrap();
-    f.vault.set(f.env, &name("A"), &value("dev"), &f.device).unwrap();
-    f.vault.set(staging, &name("A"), &value("staging"), &f.device).unwrap();
+    f.vault
+        .set(f.env, &name("A"), &value("dev"), &f.device)
+        .unwrap();
+    f.vault
+        .set(staging, &name("A"), &value("staging"), &f.device)
+        .unwrap();
     reseal(&f.path, staging, "A", &sealed(&f.path, f.env, "A"));
 
     let result = f.vault.get(staging, &name("A"), &f.device);
-    assert!(matches!(err(result), VaultError::Secret(SecretError::Decrypt)));
+    assert!(matches!(
+        err(result),
+        VaultError::Secret(SecretError::Decrypt)
+    ));
 }
 
 #[test]
@@ -291,7 +340,9 @@ fn plaintext_never_reaches_disk() {
 fn list_returns_sorted_names_without_key() {
     let mut f = setup();
     for var in ["ZETA", "ALPHA", "MID"] {
-        f.vault.set(f.env, &name(var), &value("v"), &f.device).unwrap();
+        f.vault
+            .set(f.env, &name(var), &value("v"), &f.device)
+            .unwrap();
     }
     let names: Vec<String> = f
         .vault
@@ -306,8 +357,12 @@ fn list_returns_sorted_names_without_key() {
 #[test]
 fn names_are_case_sensitive() {
     let mut f = setup();
-    f.vault.set(f.env, &name("DB_URL"), &value("upper"), &f.device).unwrap();
-    f.vault.set(f.env, &name("db_url"), &value("lower"), &f.device).unwrap();
+    f.vault
+        .set(f.env, &name("DB_URL"), &value("upper"), &f.device)
+        .unwrap();
+    f.vault
+        .set(f.env, &name("db_url"), &value("lower"), &f.device)
+        .unwrap();
     let get = |var| f.vault.get(f.env, &name(var), &f.device).unwrap().unwrap();
     assert_eq!(get("DB_URL").expose(), "upper");
     assert_eq!(get("db_url").expose(), "lower");
@@ -316,7 +371,9 @@ fn names_are_case_sensitive() {
 #[test]
 fn remove_reports_whether_secret_existed() {
     let mut f = setup();
-    f.vault.set(f.env, &name("A"), &value("v"), &f.device).unwrap();
+    f.vault
+        .set(f.env, &name("A"), &value("v"), &f.device)
+        .unwrap();
     assert!(f.vault.remove(f.env, &name("A")).unwrap());
     assert!(!f.vault.remove(f.env, &name("A")).unwrap());
     assert!(f.vault.get(f.env, &name("A"), &f.device).unwrap().is_none());
@@ -325,23 +382,39 @@ fn remove_reports_whether_secret_existed() {
 #[test]
 fn rename_keeps_ciphertext_and_value() {
     let mut f = setup();
-    let key_id = f.vault.set(f.env, &name("OLD"), &value("v"), &f.device).unwrap();
+    let key_id = f
+        .vault
+        .set(f.env, &name("OLD"), &value("v"), &f.device)
+        .unwrap();
     let before = sealed(&f.path, f.env, "OLD");
 
     f.vault.rename(f.env, &name("OLD"), &name("NEW")).unwrap();
 
     assert_eq!(sealed(&f.path, f.env, "NEW"), before);
     assert_eq!(f.vault.list(f.env).unwrap()[0].key_id, key_id);
-    let back = f.vault.get(f.env, &name("NEW"), &f.device).unwrap().unwrap();
+    let back = f
+        .vault
+        .get(f.env, &name("NEW"), &f.device)
+        .unwrap()
+        .unwrap();
     assert_eq!(back.expose(), "v");
-    assert!(f.vault.get(f.env, &name("OLD"), &f.device).unwrap().is_none());
+    assert!(
+        f.vault
+            .get(f.env, &name("OLD"), &f.device)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
 fn rename_onto_existing_name_is_taken() {
     let mut f = setup();
-    f.vault.set(f.env, &name("A"), &value("a"), &f.device).unwrap();
-    f.vault.set(f.env, &name("B"), &value("b"), &f.device).unwrap();
+    f.vault
+        .set(f.env, &name("A"), &value("a"), &f.device)
+        .unwrap();
+    f.vault
+        .set(f.env, &name("B"), &value("b"), &f.device)
+        .unwrap();
 
     let result = f.vault.rename(f.env, &name("A"), &name("B"));
     assert!(matches!(err(result), VaultError::NameTaken));

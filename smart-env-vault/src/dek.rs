@@ -1,4 +1,4 @@
-use crate::{KeyError, PublicKey};
+use crate::{Aad, EncryptedValue, KeyError, PublicKey, SecretError, SecretValue};
 use age::{Decryptor, Encryptor};
 use std::io::{Cursor, Read, Write};
 use zeroize::Zeroizing;
@@ -50,6 +50,14 @@ impl Dek {
             .read_exact(&mut bytes)
             .map_err(|_| KeyError::Unwrap)?;
         Ok(Self(Zeroizing::new(bytes)))
+    }
+
+    pub fn encrypt(&self, value: &SecretValue, aad: &Aad) -> Result<EncryptedValue, SecretError> {
+        todo!()
+    }
+
+    pub fn decrypt(&self, value: &EncryptedValue, aad: &Aad) -> Result<SecretValue, SecretError> {
+        todo!()
     }
 }
 
@@ -138,5 +146,124 @@ mod tests {
     #[test]
     fn debug_does_not_reveal_bytes() {
         assert_eq!(format!("{:?}", Dek::generate().unwrap()), "Dek(..)");
+    }
+
+    mod values {
+        use super::*;
+        use crate::{
+            EnvironmentId, FORMAT_VERSION, KeyId, MAX_VALUE_LEN, ProjectId, SecretValue, VaultId,
+        };
+
+        fn aad() -> Aad {
+            Aad {
+                format_version: FORMAT_VERSION,
+                vault: VaultId::new(),
+                project: ProjectId::new(),
+                environment: EnvironmentId::new(),
+                key: KeyId::new(),
+                dek_version: 1,
+            }
+        }
+
+        fn value(text: &str) -> SecretValue {
+            SecretValue::new(text.to_owned()).unwrap()
+        }
+
+        #[test]
+        fn round_trip_preserves_value() {
+            let dek = Dek::generate().unwrap();
+            let aad = aad();
+            for text in [
+                "postgres://u:p@h/db",
+                "zażółć 🔑",
+                "",
+                &"x".repeat(MAX_VALUE_LEN),
+            ] {
+                let encrypted = dek.encrypt(&value(text), &aad).unwrap();
+                assert_eq!(dek.decrypt(&encrypted, &aad).unwrap().expose(), text);
+            }
+        }
+
+        #[test]
+        fn same_value_encrypts_differently() {
+            let dek = Dek::generate().unwrap();
+            let aad = aad();
+            let first = dek.encrypt(&value("v"), &aad).unwrap();
+            let second = dek.encrypt(&value("v"), &aad).unwrap();
+            assert_ne!(first.nonce, second.nonce);
+            assert_ne!(first.ciphertext, second.ciphertext);
+        }
+
+        #[test]
+        fn ciphertext_is_value_plus_tag() {
+            let encrypted = Dek::generate()
+                .unwrap()
+                .encrypt(&value("abc"), &aad())
+                .unwrap();
+            assert_eq!(encrypted.ciphertext.len(), 3 + 16);
+        }
+
+        #[test]
+        fn tampered_ciphertext_or_nonce_is_rejected() {
+            let dek = Dek::generate().unwrap();
+            let aad = aad();
+            let good = dek.encrypt(&value("v"), &aad).unwrap();
+            let mut ciphertext = good.clone();
+            ciphertext.ciphertext[0] ^= 1;
+            let mut nonce = good.clone();
+            nonce.nonce[0] ^= 1;
+            for bad in [ciphertext, nonce] {
+                assert_eq!(dek.decrypt(&bad, &aad).unwrap_err(), SecretError::Decrypt);
+            }
+        }
+
+        #[test]
+        fn every_aad_field_is_authenticated() {
+            let dek = Dek::generate().unwrap();
+            let aad = aad();
+            let encrypted = dek.encrypt(&value("v"), &aad).unwrap();
+            let variants = [
+                Aad { format_version: 2, ..aad },
+                Aad { vault: VaultId::new(), ..aad },
+                Aad { project: ProjectId::new(), ..aad },
+                Aad { environment: EnvironmentId::new(), ..aad },
+                Aad { key: KeyId::new(), ..aad },
+                Aad { dek_version: 2, ..aad },
+            ];
+            for other in variants {
+                assert_eq!(
+                    dek.decrypt(&encrypted, &other).unwrap_err(),
+                    SecretError::Decrypt,
+                    "{other:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn other_dek_cannot_decrypt() {
+            let aad = aad();
+            let encrypted = Dek::generate()
+                .unwrap()
+                .encrypt(&value("v"), &aad)
+                .unwrap();
+            assert_eq!(
+                Dek::generate().unwrap().decrypt(&encrypted, &aad).unwrap_err(),
+                SecretError::Decrypt
+            );
+        }
+
+        #[test]
+        fn ciphertext_does_not_contain_plaintext() {
+            let encrypted = Dek::generate()
+                .unwrap()
+                .encrypt(&value("PLAINTEXT-MARKER"), &aad())
+                .unwrap();
+            assert!(
+                !encrypted
+                    .ciphertext
+                    .windows(16)
+                    .any(|window| window == b"PLAINTEXT-MARKER")
+            );
+        }
     }
 }

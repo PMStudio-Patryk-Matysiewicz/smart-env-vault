@@ -27,7 +27,9 @@ fn recovery_key_restores_access_on_new_machine() {
     let recovery = RecoveryKey::parse(&recovery_text).unwrap();
     let dek = Dek::unwrap(&envelope, &recovery).unwrap();
     let new_device = DeviceKey::generate();
-    let new_envelope = dek.wrap(&[&new_device.public(), &recovery.public()]).unwrap();
+    let new_envelope = dek
+        .wrap(&[&new_device.public(), &recovery.public()])
+        .unwrap();
 
     assert!(Dek::unwrap(&new_envelope, &new_device).is_ok());
 }

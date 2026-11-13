@@ -1,5 +1,6 @@
 use crate::KeyError;
 use age::x25519;
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 use secrecy::{ExposeSecret, SecretString};
 use std::str::FromStr;
 
@@ -52,8 +53,30 @@ impl DeviceKey {
 }
 
 impl PublicKey {
+    /// Parses the text form (`age1...`), e.g. read from the recipients table.
+    ///
+    /// # Errors
+    /// [`KeyError::InvalidPublicKey`] if the text is not a valid public key
+    /// (surrounding whitespace is not accepted).
+    pub fn parse(text: &str) -> Result<Self, KeyError> {
+        let _ = text;
+        todo!()
+    }
+
     pub(crate) fn recipient(&self) -> &x25519::Recipient {
         &self.0
+    }
+}
+
+impl ToSql for PublicKey {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(self.to_string()))
+    }
+}
+
+impl FromSql for PublicKey {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        Self::parse(value.as_str()?).map_err(|error| FromSqlError::Other(Box::new(error)))
     }
 }
 
@@ -75,6 +98,10 @@ impl std::fmt::Debug for DeviceKey {
 impl crate::Unwrapper for DeviceKey {
     fn identity(&self) -> &dyn age::Identity {
         &self.0
+    }
+
+    fn public(&self) -> PublicKey {
+        todo!()
     }
 }
 
@@ -114,6 +141,32 @@ mod tests {
             DeviceKey::from_secret(&bad).unwrap_err(),
             KeyError::InvalidDeviceKey
         );
+    }
+
+    #[test]
+    fn public_key_round_trips_through_text() {
+        let key = DeviceKey::generate().public();
+        assert_eq!(PublicKey::parse(&key.to_string()).unwrap(), key);
+    }
+
+    #[test]
+    fn public_key_parse_rejects_garbage() {
+        let key = DeviceKey::generate();
+        let padded = format!(" {} ", key.public());
+        let private = key.to_secret().expose_secret().to_owned();
+        for bad in ["", "age1", "not-a-key", padded.as_str(), private.as_str()] {
+            assert_eq!(
+                PublicKey::parse(bad).unwrap_err(),
+                KeyError::InvalidPublicKey,
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unwrapper_public_matches_key() {
+        let key = DeviceKey::generate();
+        assert_eq!(crate::Unwrapper::public(&key), key.public());
     }
 
     #[test]

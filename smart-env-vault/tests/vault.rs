@@ -1,7 +1,8 @@
 use rusqlite::{Connection, params};
 use smart_env_vault::{
-    DeviceKey, EnvKind, EnvironmentId, HISTORY_LIMIT, KeyError, ProjectId, RecoveryKey,
-    SecretError, SecretValue, SetOutcome, VarName, Vault, VaultError,
+    Dek, DeviceKey, EnvKind, EnvironmentId, HISTORY_LIMIT, KeyError, ProjectId, Recipient,
+    RecipientId, RecipientKind, RecoveryKey, SecretError, SecretValue, SetOutcome, VarName, Vault,
+    VaultError, WrappedDek,
 };
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -14,23 +15,31 @@ struct Fixture {
     env: EnvironmentId,
     device: DeviceKey,
     recovery: RecoveryKey,
+    device_id: RecipientId,
+    recovery_id: RecipientId,
 }
 
-/// Vault with project "payments" and environment "dev" wrapped for a device and a recovery key.
+/// Vault with recipients "laptop" (device) and "recovery", project "payments" and environment "dev".
 fn setup() -> Fixture {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("vault.db");
     let device = DeviceKey::generate();
     let (recovery, _) = RecoveryKey::generate();
     let mut vault = Vault::create(&path).unwrap();
+    let device_id = vault
+        .add_recipient(RecipientKind::Device, "laptop", &device.public(), &device)
+        .unwrap();
+    let recovery_id = vault
+        .add_recipient(
+            RecipientKind::Recovery,
+            "recovery",
+            &recovery.public(),
+            &device,
+        )
+        .unwrap();
     let project = vault.create_project("payments").unwrap();
     let env = vault
-        .create_environment(
-            project,
-            "dev",
-            EnvKind::Dev,
-            &[&device.public(), &recovery.public()],
-        )
+        .create_environment(project, "dev", EnvKind::Dev)
         .unwrap();
     Fixture {
         dir,
@@ -40,6 +49,8 @@ fn setup() -> Fixture {
         env,
         device,
         recovery,
+        device_id,
+        recovery_id,
     }
 }
 
@@ -152,24 +163,18 @@ fn open_rejects_non_vault_file() {
 #[test]
 fn environment_in_unknown_project_is_not_found() {
     let mut fixture = setup();
-    let result = fixture.vault.create_environment(
-        ProjectId::new(),
-        "dev",
-        EnvKind::Dev,
-        &[&fixture.device.public()],
-    );
+    let result = fixture
+        .vault
+        .create_environment(ProjectId::new(), "dev", EnvKind::Dev);
     assert!(matches!(err(result), VaultError::NotFound));
 }
 
 #[test]
 fn duplicate_environment_name_is_taken() {
     let mut fixture = setup();
-    let result = fixture.vault.create_environment(
-        fixture.project,
-        "dev",
-        EnvKind::Dev,
-        &[&fixture.device.public()],
-    );
+    let result = fixture
+        .vault
+        .create_environment(fixture.project, "dev", EnvKind::Dev);
     assert!(matches!(err(result), VaultError::NameTaken));
 }
 
@@ -290,12 +295,7 @@ fn ciphertext_moved_to_other_environment_fails() {
     let mut f = setup();
     let staging = f
         .vault
-        .create_environment(
-            f.project,
-            "staging",
-            EnvKind::Staging,
-            &[&f.device.public(), &f.recovery.public()],
-        )
+        .create_environment(f.project, "staging", EnvKind::Staging)
         .unwrap();
     f.vault
         .set(f.env, &name("A"), &value("dev"), &f.device)
@@ -497,12 +497,7 @@ fn revision_is_per_environment() {
     let mut f = setup();
     let staging = f
         .vault
-        .create_environment(
-            f.project,
-            "staging",
-            EnvKind::Staging,
-            &[&f.device.public()],
-        )
+        .create_environment(f.project, "staging", EnvKind::Staging)
         .unwrap();
     put(&mut f, "A", "a");
     assert_eq!(f.vault.revision(staging).unwrap(), 0);
@@ -768,4 +763,200 @@ fn purge_works_on_removed_secret() {
     f.vault.remove(f.env, &name("A")).unwrap();
     assert!(f.vault.purge(f.env, &name("A")).unwrap());
     assert!(rows(&f.path).is_empty());
+}
+
+// --- A2: recipients and per-recipient wraps -----------------------------------
+
+/// (kind, label, revoked) of every recipient, for compact assertions.
+fn summary(recipients: Vec<Recipient>) -> Vec<(RecipientKind, String, bool)> {
+    recipients
+        .into_iter()
+        .map(|r| (r.kind, r.label, r.revoked))
+        .collect()
+}
+
+fn labels(recipients: Vec<Recipient>) -> Vec<String> {
+    recipients.into_iter().map(|r| r.label).collect()
+}
+
+/// Number of rows in `dek_wraps`, read directly from the file.
+fn wrap_rows(path: &Path) -> i64 {
+    raw(path)
+        .query_row("SELECT count(*) FROM dek_wraps", [], |row| row.get(0))
+        .unwrap()
+}
+
+#[test]
+fn new_environment_is_wrapped_for_every_active_recipient() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    let by_recovery = f.vault.get(f.env, &name("A"), &f.recovery).unwrap();
+    assert_eq!(by_recovery.unwrap().expose(), "a");
+    assert_eq!(
+        labels(f.vault.environment_recipients(f.env).unwrap()),
+        ["laptop", "recovery"]
+    );
+}
+
+#[test]
+fn each_wrap_opens_only_with_its_recipient_key() {
+    let f = setup();
+    assert_eq!(wrap_rows(&f.path), 2);
+    let device_wrap: Vec<u8> = raw(&f.path)
+        .query_row(
+            "SELECT w.wrapped FROM dek_wraps w JOIN recipients r ON r.id = w.recipient_id
+              WHERE r.label = 'laptop'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let envelope = WrappedDek::from_bytes(device_wrap);
+    assert!(Dek::unwrap(&envelope, &f.device).is_ok());
+    assert_eq!(
+        Dek::unwrap(&envelope, &f.recovery).unwrap_err(),
+        KeyError::Unwrap
+    );
+}
+
+#[test]
+fn revoked_recipient_gets_no_wrap_for_new_environment() {
+    let mut f = setup();
+    f.vault.revoke_recipient(f.recovery_id).unwrap();
+    let staging = f
+        .vault
+        .create_environment(f.project, "staging", EnvKind::Staging)
+        .unwrap();
+    f.vault
+        .set(staging, &name("A"), &value("s"), &f.device)
+        .unwrap();
+
+    let result = f.vault.get(staging, &name("A"), &f.recovery);
+    assert!(matches!(err(result), VaultError::Key(KeyError::Unwrap)));
+    assert_eq!(
+        labels(f.vault.environment_recipients(staging).unwrap()),
+        ["laptop"]
+    );
+}
+
+#[test]
+fn revoked_recipient_keeps_existing_wraps_until_rotation() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    f.vault.revoke_recipient(f.recovery_id).unwrap();
+
+    let back = f.vault.get(f.env, &name("A"), &f.recovery).unwrap();
+    assert_eq!(back.unwrap().expose(), "a");
+    let recovery = f
+        .vault
+        .environment_recipients(f.env)
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id == f.recovery_id)
+        .unwrap();
+    assert!(recovery.revoked);
+}
+
+#[test]
+fn adding_recipient_wraps_existing_environments() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    let machine = DeviceKey::generate();
+    f.vault
+        .add_recipient(RecipientKind::Machine, "ci", &machine.public(), &f.device)
+        .unwrap();
+
+    let back = f.vault.get(f.env, &name("A"), &machine).unwrap();
+    assert_eq!(back.unwrap().expose(), "a");
+    assert_eq!(
+        labels(f.vault.environment_recipients(f.env).unwrap()),
+        ["laptop", "recovery", "ci"]
+    );
+}
+
+#[test]
+fn add_recipient_with_foreign_key_changes_nothing() {
+    let mut f = setup();
+    let before = summary(f.vault.recipients().unwrap());
+    let intruder = DeviceKey::generate();
+
+    let result = f.vault.add_recipient(
+        RecipientKind::Device,
+        "intruder",
+        &intruder.public(),
+        &intruder,
+    );
+    assert!(matches!(err(result), VaultError::Key(KeyError::Unwrap)));
+    assert_eq!(summary(f.vault.recipients().unwrap()), before);
+    assert_eq!(wrap_rows(&f.path), 2);
+}
+
+#[test]
+fn environment_needs_an_active_recipient() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("vault.db");
+    let mut vault = Vault::create(&path).unwrap();
+    let project = vault.create_project("payments").unwrap();
+    let no_recipients = vault.create_environment(project, "dev", EnvKind::Dev);
+    assert!(matches!(err(no_recipients), VaultError::NoRecipients));
+
+    let device = DeviceKey::generate();
+    let id = vault
+        .add_recipient(RecipientKind::Device, "laptop", &device.public(), &device)
+        .unwrap();
+    vault.revoke_recipient(id).unwrap();
+    let only_revoked = vault.create_environment(project, "dev", EnvKind::Dev);
+    assert!(matches!(err(only_revoked), VaultError::NoRecipients));
+
+    let environments: i64 = raw(&path)
+        .query_row("SELECT count(*) FROM environments", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(environments, 0);
+}
+
+#[test]
+fn duplicate_public_key_is_taken() {
+    let mut f = setup();
+    let result = f.vault.add_recipient(
+        RecipientKind::Machine,
+        "again",
+        &f.device.public(),
+        &f.device,
+    );
+    assert!(matches!(err(result), VaultError::NameTaken));
+    assert_eq!(f.vault.recipients().unwrap().len(), 2);
+}
+
+#[test]
+fn revoke_unknown_recipient_is_not_found() {
+    let mut f = setup();
+    assert!(matches!(
+        err(f.vault.revoke_recipient(RecipientId::new())),
+        VaultError::NotFound
+    ));
+}
+
+#[test]
+fn recipients_lists_kind_label_and_state() {
+    let mut f = setup();
+    assert_eq!(
+        summary(f.vault.recipients().unwrap()),
+        [
+            (RecipientKind::Device, "laptop".to_owned(), false),
+            (RecipientKind::Recovery, "recovery".to_owned(), false),
+        ]
+    );
+    f.vault.revoke_recipient(f.recovery_id).unwrap();
+    f.vault.revoke_recipient(f.recovery_id).unwrap(); // second revoke is a no-op
+    let recipients = f.vault.recipients().unwrap();
+    assert_eq!(recipients[0].id, f.device_id);
+    assert_eq!(recipients[0].public_key, f.device.public());
+    assert!(recipients[1].revoked);
+}
+
+#[test]
+fn secret_without_wrap_for_key_is_unwrap_error_not_none() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    let result = f.vault.get(f.env, &name("A"), &DeviceKey::generate());
+    assert!(matches!(err(result), VaultError::Key(KeyError::Unwrap)));
 }

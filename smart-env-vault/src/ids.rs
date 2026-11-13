@@ -67,6 +67,10 @@ id_type!(
     /// Stable identity of a secret. Survives renaming, unlike its [`VarName`](crate::VarName).
     KeyId
 );
+id_type!(
+    /// Identifier of a vault recipient: a device, the recovery key or a machine key.
+    RecipientId
+);
 
 #[cfg(test)]
 mod tests {

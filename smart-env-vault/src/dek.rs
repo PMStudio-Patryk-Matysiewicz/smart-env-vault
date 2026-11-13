@@ -25,6 +25,9 @@ pub struct WrappedDek(Vec<u8>);
 pub trait Unwrapper {
     /// The underlying `age` identity used to decrypt the envelope.
     fn identity(&self) -> &dyn age::Identity;
+    /// The matching public key, used to find this key's envelope among the
+    /// recipients of a DEK.
+    fn public(&self) -> PublicKey;
 }
 
 impl Dek {

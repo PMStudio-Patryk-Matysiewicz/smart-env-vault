@@ -1,6 +1,6 @@
 use crate::{
     Aad, Dek, EncryptedValue, EnvironmentId, FORMAT_VERSION, KeyError, KeyId, ProjectId, PublicKey,
-    SecretError, SecretValue, Unwrapper, VarName, VaultId, WrappedDek,
+    RecipientId, SecretError, SecretValue, Unwrapper, VarName, VaultId, WrappedDek,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, ffi, params};
 use std::{fs::OpenOptions, path::Path};
@@ -27,6 +27,10 @@ pub enum VaultError {
     /// [`Vault::undo`] found no previous version of the secret.
     #[error("no previous version to restore")]
     NothingToUndo,
+    /// [`Vault::create_environment`] found no active recipient to wrap the
+    /// new DEK for; add one with [`Vault::add_recipient`] first.
+    #[error("vault has no active recipients")]
+    NoRecipients,
     /// Key error, e.g. [`KeyError::Unwrap`] when the key cannot open the environment DEK.
     #[error(transparent)]
     Key(#[from] KeyError),
@@ -80,6 +84,33 @@ impl EnvKind {
             Self::Custom => "custom",
         }
     }
+}
+
+/// Who a [`Recipient`] is. Stored as data (ADR-001).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecipientKind {
+    /// A device of the user ([`DeviceKey`](crate::DeviceKey)).
+    Device,
+    /// The recovery key ([`RecoveryKey`](crate::RecoveryKey)).
+    Recovery,
+    /// A machine identity, e.g. CI or the zero-knowledge proxy.
+    Machine,
+}
+
+/// A public key the vault wraps environment DEKs for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Recipient {
+    /// Stable identity of the recipient.
+    pub id: RecipientId,
+    /// Device, recovery key or machine.
+    pub kind: RecipientKind,
+    /// Human label, e.g. `laptop Oli`.
+    pub label: String,
+    /// The key DEKs are wrapped for.
+    pub public_key: PublicKey,
+    /// Revoked recipients get no envelope for new DEKs, but keep the ones
+    /// they already have until the DEK is rotated.
+    pub revoked: bool,
 }
 
 /// Secret metadata returned by [`Vault::list`], without the value.
@@ -209,34 +240,70 @@ impl Vault {
         Ok(id)
     }
 
-    /// Creates an environment with DEK version 1 wrapped for `recipients`.
+    /// Adds a recipient and wraps the active DEK of every existing
+    /// environment for it, in one transaction.
     ///
-    /// `recipients` should include the device key and the recovery key, or
-    /// the environment cannot be recovered after losing the device.
+    /// `key` must open all those DEKs (on an empty vault it is not used).
+    /// New environments are wrapped for every active recipient
+    /// automatically.
     ///
     /// # Errors
+    /// [`VaultError::Key`] (`Unwrap`) if `key` cannot open some environment —
+    /// nothing is written; [`VaultError::NameTaken`] if this public key is
+    /// already a recipient.
+    pub fn add_recipient(
+        &mut self,
+        kind: RecipientKind,
+        label: &str,
+        public_key: &PublicKey,
+        key: &impl Unwrapper,
+    ) -> Result<RecipientId, VaultError> {
+        let _ = (kind, label, public_key, key);
+        todo!()
+    }
+
+    /// Revokes a recipient: it gets no envelope for new DEKs. Envelopes it
+    /// already has stay until the DEK is rotated (F08). Revoking twice is a
+    /// no-op.
+    ///
+    /// # Errors
+    /// [`VaultError::NotFound`] for an unknown recipient.
+    pub fn revoke_recipient(&mut self, id: RecipientId) -> Result<(), VaultError> {
+        let _ = id;
+        todo!()
+    }
+
+    /// All recipients of the vault, including revoked ones, in the order
+    /// they were added.
+    pub fn recipients(&self) -> Result<Vec<Recipient>, VaultError> {
+        todo!()
+    }
+
+    /// Who can open the active DEK of an environment: every recipient with
+    /// an envelope for it (a revoked one too, until rotation).
+    ///
+    /// # Errors
+    /// [`VaultError::NotFound`] for an unknown environment.
+    pub fn environment_recipients(&self, env: EnvironmentId) -> Result<Vec<Recipient>, VaultError> {
+        let _ = env;
+        todo!()
+    }
+
+    /// Creates an environment with a new DEK (version 1) wrapped separately
+    /// for every active recipient of the vault.
+    ///
+    /// # Errors
+    /// [`VaultError::NoRecipients`] if the vault has no active recipient,
     /// [`VaultError::NotFound`] for an unknown project, [`VaultError::NameTaken`]
-    /// for a duplicate name in the project, [`VaultError::Key`] if `recipients` is empty.
+    /// for a duplicate name in the project. Nothing is written on error.
     pub fn create_environment(
         &mut self,
         project: ProjectId,
         name: &str,
         kind: EnvKind,
-        recipients: &[&PublicKey],
     ) -> Result<EnvironmentId, VaultError> {
-        let wrapped = Dek::generate()?.wrap(recipients)?;
-        let id = EnvironmentId::new();
-        let tx = self.conn.transaction()?;
-        tx.execute(
-            "INSERT INTO environments (id, project_id, name, kind) VALUES (?1, ?2, ?3, ?4)",
-            params![id, project, name, kind.as_str()],
-        )?;
-        tx.execute(
-            "INSERT INTO environment_deks (environment_id, version, wrapped) VALUES (?1, 1, ?2)",
-            params![id, wrapped.as_bytes()],
-        )?;
-        tx.commit()?;
-        Ok(id)
+        let _ = (project, name, kind.as_str());
+        todo!()
     }
 
     /// Saves a secret: creates it or overwrites its value.

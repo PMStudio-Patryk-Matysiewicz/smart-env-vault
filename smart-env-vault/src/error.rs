@@ -8,6 +8,9 @@ pub enum KeyError {
     /// The key is not a recipient of this envelope, or the envelope is corrupted.
     #[error("key does not match this envelope or the envelope is corrupted")]
     Unwrap,
+    /// The text is not a valid public key (`age1...`).
+    #[error("invalid public key")]
+    InvalidPublicKey,
     /// No recipients were given, or `age` encryption failed.
     #[error("could not wrap key")]
     Wrap,

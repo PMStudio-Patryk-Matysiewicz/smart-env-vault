@@ -25,10 +25,19 @@ CREATE TABLE environments (
     UNIQUE (project_id, name)
 ) STRICT;
 
+CREATE TABLE recipients (
+    id         BLOB NOT NULL PRIMARY KEY CHECK (length(id) = 16),
+    vault_id   BLOB NOT NULL REFERENCES vaults(id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL CHECK (kind IN ('device', 'recovery', 'machine')),
+    label      TEXT NOT NULL CHECK (length(label) BETWEEN 1 AND 128),
+    public_key TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    revoked_at TEXT
+) STRICT;
+
 CREATE TABLE environment_deks (
     environment_id BLOB    NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
     version        INTEGER NOT NULL CHECK (version >= 1),
-    wrapped        BLOB    NOT NULL CHECK (length(wrapped) > 0),
     created_at     TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     retired_at     TEXT,
     PRIMARY KEY (environment_id, version)
@@ -37,6 +46,16 @@ CREATE TABLE environment_deks (
 CREATE UNIQUE INDEX environment_deks_one_active
     ON environment_deks (environment_id)
     WHERE retired_at IS NULL;
+
+CREATE TABLE dek_wraps (
+    environment_id BLOB    NOT NULL,
+    dek_version    INTEGER NOT NULL,
+    recipient_id   BLOB    NOT NULL REFERENCES recipients(id),
+    wrapped        BLOB    NOT NULL CHECK (length(wrapped) > 0),
+    PRIMARY KEY (environment_id, dek_version, recipient_id),
+    FOREIGN KEY (environment_id, dek_version)
+        REFERENCES environment_deks (environment_id, version) ON DELETE CASCADE
+) STRICT;
 
 CREATE TABLE secrets (
     key_id         BLOB    NOT NULL PRIMARY KEY CHECK (length(key_id) = 16),

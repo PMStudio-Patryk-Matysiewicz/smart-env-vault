@@ -6,6 +6,7 @@ const VAULT: [u8; 16] = [1; 16];
 const PROJECT: [u8; 16] = [2; 16];
 const ENV: [u8; 16] = [3; 16];
 const KEY: [u8; 16] = [4; 16];
+const RECIPIENT: [u8; 16] = [5; 16];
 
 fn id(n: u8) -> [u8; 16] {
     [n; 16]
@@ -18,11 +19,13 @@ fn open() -> Connection {
     db
 }
 
-/// Vault -> project "payments" -> env "dev" with active DEK v1 -> secret DATABASE_URL.
+/// Vault with recipient "laptop" -> project "payments" -> env "dev" with active DEK v1
+/// wrapped for the recipient -> secret DATABASE_URL.
 fn seeded() -> Connection {
     let db = open();
     db.execute("INSERT INTO vaults (id) VALUES (?1)", [VAULT])
         .unwrap();
+    insert_recipient(&db, RECIPIENT, "device", "age1laptop").unwrap();
     db.execute(
         "INSERT INTO projects (id, vault_id, name) VALUES (?1, ?2, 'payments')",
         [PROJECT, VAULT],
@@ -34,12 +37,32 @@ fn seeded() -> Connection {
     )
     .unwrap();
     db.execute(
-        "INSERT INTO environment_deks (environment_id, version, wrapped) VALUES (?1, 1, x'00')",
+        "INSERT INTO environment_deks (environment_id, version) VALUES (?1, 1)",
         [ENV],
     )
     .unwrap();
+    insert_wrap(&db, 1, RECIPIENT).unwrap();
     insert_secret(&db, KEY, "DATABASE_URL", 1, &[0; 12], &[0; 20]).unwrap();
     db
+}
+
+fn insert_recipient(
+    db: &Connection,
+    id: [u8; 16],
+    kind: &str,
+    public_key: &str,
+) -> rusqlite::Result<usize> {
+    db.execute(
+        "INSERT INTO recipients (id, vault_id, kind, label, public_key) VALUES (?1, ?2, ?3, 'label', ?4)",
+        params![id, VAULT, kind, public_key],
+    )
+}
+
+fn insert_wrap(db: &Connection, dek_version: i64, recipient: [u8; 16]) -> rusqlite::Result<usize> {
+    db.execute(
+        "INSERT INTO dek_wraps (environment_id, dek_version, recipient_id, wrapped) VALUES (?1, ?2, ?3, x'00')",
+        params![ENV, dek_version, recipient],
+    )
 }
 
 fn insert_secret(
@@ -131,7 +154,7 @@ fn environment_kind_and_access_are_closed_sets() {
 fn only_one_active_dek_per_environment() {
     let db = seeded();
     assert_constraint(db.execute(
-        "INSERT INTO environment_deks (environment_id, version, wrapped) VALUES (?1, 2, x'00')",
+        "INSERT INTO environment_deks (environment_id, version) VALUES (?1, 2)",
         [ENV],
     ));
 }
@@ -145,7 +168,7 @@ fn rotation_retires_old_dek_and_activates_new_one() {
     )
     .unwrap();
     db.execute(
-        "INSERT INTO environment_deks (environment_id, version, wrapped) VALUES (?1, 2, x'00')",
+        "INSERT INTO environment_deks (environment_id, version) VALUES (?1, 2)",
         [ENV],
     )
     .unwrap();
@@ -298,11 +321,58 @@ fn deleting_vault_cascades_to_everything() {
         .unwrap();
     for table in [
         "projects",
+        "recipients",
         "environments",
         "environment_deks",
+        "dek_wraps",
         "secrets",
         "secret_versions",
     ] {
         assert_eq!(count(&db, table), 0, "{table} not emptied");
     }
+}
+
+#[test]
+fn recipient_kind_is_a_closed_set() {
+    let db = seeded();
+    assert_constraint(insert_recipient(&db, id(9), "admin", "age1other"));
+    for (n, kind) in [(10, "device"), (11, "recovery"), (12, "machine")] {
+        insert_recipient(&db, id(n), kind, &format!("age1{kind}")).unwrap();
+    }
+}
+
+#[test]
+fn recipient_public_key_is_unique() {
+    let db = seeded();
+    assert_constraint(insert_recipient(&db, id(9), "machine", "age1laptop"));
+}
+
+#[test]
+fn wrap_needs_existing_dek_version_and_recipient() {
+    let db = seeded();
+    assert_constraint(insert_wrap(&db, 1, RECIPIENT)); // one wrap per (version, recipient)
+    assert_constraint(insert_wrap(&db, 7, RECIPIENT));
+    assert_constraint(insert_wrap(&db, 1, id(9)));
+}
+
+#[test]
+fn deleting_dek_version_deletes_its_wraps() {
+    let db = seeded();
+    db.execute(
+        "UPDATE environment_deks SET retired_at = CURRENT_TIMESTAMP WHERE environment_id = ?1",
+        [ENV],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO environment_deks (environment_id, version) VALUES (?1, 2)",
+        [ENV],
+    )
+    .unwrap();
+    insert_wrap(&db, 2, RECIPIENT).unwrap();
+    db.execute(
+        "DELETE FROM environment_deks WHERE environment_id = ?1 AND version = 2",
+        [ENV],
+    )
+    .unwrap();
+    assert_eq!(count(&db, "dek_wraps"), 1);
 }

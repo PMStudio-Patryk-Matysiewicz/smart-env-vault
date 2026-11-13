@@ -46,6 +46,10 @@ impl crate::Unwrapper for RecoveryKey {
     fn identity(&self) -> &dyn age::Identity {
         &self.0
     }
+
+    fn public(&self) -> crate::PublicKey {
+        todo!()
+    }
 }
 
 #[cfg(test)]

@@ -42,7 +42,7 @@ pub enum SecretError {
 /// Only a label: renaming does not re-encrypt, because the [`Aad`] uses the
 /// stable [`KeyId`]. Case-sensitive (`DB_URL` ≠ `db_url`). Not secret, so it
 /// implements `Debug` and `Display`.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VarName(String);
 
 impl VarName {

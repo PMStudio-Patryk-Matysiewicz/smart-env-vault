@@ -25,6 +25,34 @@ pub enum VaultError {
     /// The name is already used in this scope (`UNIQUE` violation).
     #[error("name already taken")]
     NameTaken,
+    /// No project with this id.
+    #[error("project not found")]
+    ProjectNotFound,
+    /// No environment with this id.
+    #[error("environment not found")]
+    EnvironmentNotFound,
+    /// No (live) secret with this name in the environment.
+    #[error("secret not found")]
+    SecretNotFound,
+    /// No recipient with this id.
+    #[error("recipient not found")]
+    RecipientNotFound,
+    /// A project with this name already exists in the vault.
+    #[error("project name already taken")]
+    ProjectNameTaken,
+    /// An environment with this name already exists in the project.
+    #[error("environment name already taken")]
+    EnvironmentNameTaken,
+    /// A secret with this name already exists in the environment (a removed
+    /// one too, until purged).
+    #[error("secret name already taken")]
+    SecretNameTaken,
+    /// This public key is already a recipient of the vault.
+    #[error("public key is already a recipient")]
+    RecipientKeyTaken,
+    /// [`Vault::import`] got the same name twice; nothing was written.
+    #[error("duplicate variable name in import: {0}")]
+    DuplicateName(VarName),
     /// [`Vault::undo`] found no previous version of the secret.
     #[error("no previous version to restore")]
     NothingToUndo,
@@ -135,6 +163,18 @@ pub struct Recipient {
     pub revoked: bool,
 }
 
+/// Where a secret is injected (ADR-005). An attribute of the secret, not of
+/// a value version.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Inject {
+    /// Exported by the shell hook and by `smart-env run` (default).
+    #[default]
+    Shell,
+    /// Only for `smart-env run`; never exported into the shell, so
+    /// editors, package scripts or agents started from it do not inherit it.
+    Run,
+}
+
 /// Secret metadata returned by [`Vault::list`], without the value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SecretMeta {
@@ -144,6 +184,8 @@ pub struct SecretMeta {
     pub key_id: KeyId,
     /// Version of the current value.
     pub version: u32,
+    /// Shell hook and `run`, or `run` only.
+    pub inject: Inject,
     /// Time of the last value change (UTC, `YYYY-MM-DD HH:MM:SS`).
     pub updated_at: String,
 }
@@ -521,6 +563,7 @@ impl Vault {
                     name: VarName::parse(&name)?,
                     key_id,
                     version,
+                    inject: Inject::Shell,
                     updated_at,
                 })
             })
@@ -731,6 +774,59 @@ impl Vault {
         bump_revision(&tx, env)?;
         tx.commit()?;
         Ok(true)
+    }
+
+    /// Sets where a secret is injected ([`Inject`]). Metadata only: no key
+    /// needed, value and version unchanged; increments the environment
+    /// [`revision`](Vault::revision) so the shell hook notices.
+    ///
+    /// # Errors
+    /// [`VaultError::SecretNotFound`] if the secret does not exist or was
+    /// removed.
+    pub fn set_inject(
+        &mut self,
+        env: EnvironmentId,
+        name: &VarName,
+        inject: Inject,
+    ) -> Result<(), VaultError> {
+        let _ = (env, name, inject);
+        todo!()
+    }
+
+    /// Reads and decrypts every live secret of an environment, sorted by
+    /// name — what `run` and the shell hook need. Unwraps each DEK version
+    /// once (normally once per environment) and always checks the key, even
+    /// for an empty environment.
+    ///
+    /// # Errors
+    /// [`VaultError::EnvironmentNotFound`], [`VaultError::Key`] (`Unwrap`)
+    /// for a wrong key, [`VaultError::Secret`] (`Decrypt`) for tampered data.
+    pub fn read_all(
+        &self,
+        env: EnvironmentId,
+        key: &impl Unwrapper,
+    ) -> Result<Vec<(SecretMeta, SecretValue)>, VaultError> {
+        let _ = (env, key);
+        todo!()
+    }
+
+    /// Writes many secrets in one transaction: all or nothing. A name that
+    /// already exists gets a new version (the old value goes to history).
+    /// Increments the [`revision`](Vault::revision) once. Returns the
+    /// outcomes in input order.
+    ///
+    /// # Errors
+    /// [`VaultError::DuplicateName`] if a name appears twice in `entries`,
+    /// [`VaultError::EnvironmentNotFound`], [`VaultError::Key`] (`Unwrap`) for
+    /// a wrong key. Nothing is written on error.
+    pub fn import(
+        &mut self,
+        env: EnvironmentId,
+        entries: &[(VarName, SecretValue)],
+        key: &impl Unwrapper,
+    ) -> Result<Vec<SetOutcome>, VaultError> {
+        let _ = (env, entries, key);
+        todo!()
     }
 }
 

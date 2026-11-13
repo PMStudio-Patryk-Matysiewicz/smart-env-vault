@@ -1,8 +1,8 @@
 use rusqlite::{Connection, params};
 use smart_env_vault::{
-    Dek, DeviceKey, EnvKind, EnvironmentId, HISTORY_LIMIT, KeyError, ProjectId, Recipient,
-    RecipientId, RecipientKind, RecoveryKey, SecretError, SecretValue, SetOutcome, VarName, Vault,
-    VaultError, WrappedDek,
+    Dek, DeviceKey, EnvKind, EnvironmentId, HISTORY_LIMIT, Inject, KeyError, ProjectId, PublicKey,
+    Recipient, RecipientId, RecipientKind, RecoveryKey, SecretError, SecretValue, SetOutcome,
+    Unwrapper, VarName, Vault, VaultError, WrappedDek,
 };
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -166,7 +166,7 @@ fn environment_in_unknown_project_is_not_found() {
     let result = fixture
         .vault
         .create_environment(ProjectId::new(), "dev", EnvKind::Dev);
-    assert!(matches!(err(result), VaultError::NotFound));
+    assert!(matches!(err(result), VaultError::ProjectNotFound));
 }
 
 #[test]
@@ -175,7 +175,7 @@ fn duplicate_environment_name_is_taken() {
     let result = fixture
         .vault
         .create_environment(fixture.project, "dev", EnvKind::Dev);
-    assert!(matches!(err(result), VaultError::NameTaken));
+    assert!(matches!(err(result), VaultError::EnvironmentNameTaken));
 }
 
 // --- Secrets ---------------------------------------------------------------
@@ -418,7 +418,7 @@ fn rename_onto_existing_name_is_taken() {
         .unwrap();
 
     let result = f.vault.rename(f.env, &name("A"), &name("B"));
-    assert!(matches!(err(result), VaultError::NameTaken));
+    assert!(matches!(err(result), VaultError::SecretNameTaken));
 
     let get = |var| f.vault.get(f.env, &name(var), &f.device).unwrap().unwrap();
     assert_eq!(get("A").expose(), "a");
@@ -429,7 +429,7 @@ fn rename_onto_existing_name_is_taken() {
 fn rename_missing_secret_is_not_found() {
     let mut f = setup();
     let result = f.vault.rename(f.env, &name("NOPE"), &name("OTHER"));
-    assert!(matches!(err(result), VaultError::NotFound));
+    assert!(matches!(err(result), VaultError::SecretNotFound));
 }
 
 fn put(f: &mut Fixture, var: &str, text: &str) -> SetOutcome {
@@ -529,7 +529,7 @@ fn revision_of_unknown_environment_is_not_found() {
     let f = setup();
     assert!(matches!(
         err(f.vault.revision(EnvironmentId::new())),
-        VaultError::NotFound
+        VaultError::EnvironmentNotFound
     ));
 }
 
@@ -607,7 +607,7 @@ fn history_of_missing_secret_is_not_found() {
     let f = setup();
     assert!(matches!(
         err(f.vault.history(f.env, &name("NOPE"))),
-        VaultError::NotFound
+        VaultError::SecretNotFound
     ));
 }
 
@@ -641,7 +641,7 @@ fn removed_secret_is_hidden_but_kept() {
     assert!(f.vault.list(f.env).unwrap().is_empty());
     assert!(matches!(
         err(f.vault.history(f.env, &name("A"))),
-        VaultError::NotFound
+        VaultError::SecretNotFound
     ));
     assert_eq!(rows(&f.path).len(), 1, "soft delete keeps the row");
 }
@@ -672,7 +672,7 @@ fn undo_of_missing_secret_is_not_found() {
     let mut f = setup();
     assert!(matches!(
         err(f.vault.undo(f.env, &name("NOPE"), &f.device)),
-        VaultError::NotFound
+        VaultError::SecretNotFound
     ));
 }
 
@@ -684,7 +684,7 @@ fn undo_after_purge_is_not_found() {
     assert!(f.vault.purge(f.env, &name("A")).unwrap());
     assert!(matches!(
         err(f.vault.undo(f.env, &name("A"), &f.device)),
-        VaultError::NotFound
+        VaultError::SecretNotFound
     ));
 }
 
@@ -722,7 +722,7 @@ fn rename_onto_removed_name_is_taken() {
     f.vault.remove(f.env, &name("B")).unwrap();
 
     let result = f.vault.rename(f.env, &name("A"), &name("B"));
-    assert!(matches!(err(result), VaultError::NameTaken));
+    assert!(matches!(err(result), VaultError::SecretNameTaken));
 
     f.vault.undo(f.env, &name("B"), &f.device).unwrap();
     assert_eq!(read(&f, "A").as_deref(), Some("a"));
@@ -735,7 +735,7 @@ fn rename_of_removed_secret_is_not_found() {
     put(&mut f, "A", "a");
     f.vault.remove(f.env, &name("A")).unwrap();
     let result = f.vault.rename(f.env, &name("A"), &name("B"));
-    assert!(matches!(err(result), VaultError::NotFound));
+    assert!(matches!(err(result), VaultError::SecretNotFound));
 }
 
 #[test]
@@ -747,7 +747,7 @@ fn purge_removes_secret_and_history() {
     assert!(f.vault.purge(f.env, &name("A")).unwrap());
     assert!(matches!(
         err(f.vault.history(f.env, &name("A"))),
-        VaultError::NotFound
+        VaultError::SecretNotFound
     ));
     assert!(rows(&f.path).is_empty());
     assert_eq!(history_rows(&f.path), 0);
@@ -922,7 +922,7 @@ fn duplicate_public_key_is_taken() {
         &f.device.public(),
         &f.device,
     );
-    assert!(matches!(err(result), VaultError::NameTaken));
+    assert!(matches!(err(result), VaultError::RecipientKeyTaken));
     assert_eq!(f.vault.recipients().unwrap().len(), 2);
 }
 
@@ -931,7 +931,7 @@ fn revoke_unknown_recipient_is_not_found() {
     let mut f = setup();
     assert!(matches!(
         err(f.vault.revoke_recipient(RecipientId::new())),
-        VaultError::NotFound
+        VaultError::RecipientNotFound
     ));
 }
 
@@ -959,4 +959,216 @@ fn secret_without_wrap_for_key_is_unwrap_error_not_none() {
     put(&mut f, "A", "a");
     let result = f.vault.get(f.env, &name("A"), &DeviceKey::generate());
     assert!(matches!(err(result), VaultError::Key(KeyError::Unwrap)));
+}
+
+// --- B3: inject ------------------------------------------------------------------
+
+#[test]
+fn new_secret_is_injected_into_shell() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    assert_eq!(f.vault.list(f.env).unwrap()[0].inject, Inject::Shell);
+}
+
+#[test]
+fn set_inject_marks_secret_run_only() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    f.vault.set_inject(f.env, &name("A"), Inject::Run).unwrap();
+    let meta = &f.vault.list(f.env).unwrap()[0];
+    assert_eq!(meta.inject, Inject::Run);
+    assert_eq!(meta.version, 1, "inject is metadata, not a new value");
+    assert_eq!(revision(&f), 2);
+}
+
+#[test]
+fn set_keeps_inject_of_existing_secret() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    f.vault.set_inject(f.env, &name("A"), Inject::Run).unwrap();
+    put(&mut f, "A", "b");
+    assert_eq!(f.vault.list(f.env).unwrap()[0].inject, Inject::Run);
+}
+
+#[test]
+fn set_inject_on_missing_or_removed_secret_is_not_found() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    f.vault.remove(f.env, &name("A")).unwrap();
+    for var in ["A", "NOPE"] {
+        let result = f.vault.set_inject(f.env, &name(var), Inject::Run);
+        assert!(matches!(err(result), VaultError::SecretNotFound), "{var}");
+    }
+}
+
+// --- C6: read_all and import -----------------------------------------------------
+
+/// Unwrapper that counts how many envelopes it was asked to open.
+struct Counting<'a> {
+    key: &'a DeviceKey,
+    calls: std::cell::Cell<usize>,
+}
+
+impl Unwrapper for Counting<'_> {
+    fn identity(&self) -> &dyn age::Identity {
+        self.calls.set(self.calls.get() + 1);
+        Unwrapper::identity(self.key)
+    }
+
+    fn public(&self) -> PublicKey {
+        self.key.public()
+    }
+}
+
+fn read_all(f: &Fixture) -> Vec<(String, String, Inject)> {
+    f.vault
+        .read_all(f.env, &f.device)
+        .unwrap()
+        .into_iter()
+        .map(|(meta, value)| {
+            (
+                meta.name.to_string(),
+                value.expose().to_owned(),
+                meta.inject,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn read_all_returns_every_live_secret_sorted() {
+    let mut f = setup();
+    put(&mut f, "B", "b");
+    put(&mut f, "A", "a");
+    put(&mut f, "C", "c");
+    f.vault.set_inject(f.env, &name("B"), Inject::Run).unwrap();
+    f.vault.remove(f.env, &name("C")).unwrap();
+    assert_eq!(
+        read_all(&f),
+        [
+            ("A".to_owned(), "a".to_owned(), Inject::Shell),
+            ("B".to_owned(), "b".to_owned(), Inject::Run),
+        ]
+    );
+}
+
+#[test]
+fn read_all_unwraps_dek_once() {
+    let mut f = setup();
+    for i in 0..5 {
+        put(&mut f, &format!("V{i}"), "v");
+    }
+    let counting = Counting {
+        key: &f.device,
+        calls: std::cell::Cell::new(0),
+    };
+    assert_eq!(f.vault.read_all(f.env, &counting).unwrap().len(), 5);
+    assert_eq!(counting.calls.get(), 1);
+}
+
+#[test]
+fn read_all_checks_key_even_when_empty() {
+    let f = setup();
+    let result = f.vault.read_all(f.env, &DeviceKey::generate());
+    assert!(matches!(err(result), VaultError::Key(KeyError::Unwrap)));
+}
+
+fn entries(pairs: &[(&str, &str)]) -> Vec<(VarName, SecretValue)> {
+    pairs.iter().map(|(n, v)| (name(n), value(v))).collect()
+}
+
+#[test]
+fn import_writes_all_entries_in_one_revision() {
+    let mut f = setup();
+    let outcomes = f
+        .vault
+        .import(
+            f.env,
+            &entries(&[("A", "a"), ("B", "b"), ("C", "c")]),
+            &f.device,
+        )
+        .unwrap();
+    assert_eq!(
+        outcomes.iter().map(|o| o.version).collect::<Vec<_>>(),
+        [1, 1, 1]
+    );
+    assert_eq!(revision(&f), 1);
+    assert_eq!(read(&f, "B").as_deref(), Some("b"));
+}
+
+#[test]
+fn import_overwrites_existing_as_new_version() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    let outcomes = f
+        .vault
+        .import(f.env, &entries(&[("A", "b")]), &f.device)
+        .unwrap();
+    assert_eq!(outcomes[0].version, 2);
+    f.vault.undo(f.env, &name("A"), &f.device).unwrap();
+    assert_eq!(read(&f, "A").as_deref(), Some("a"));
+}
+
+#[test]
+fn import_with_duplicate_name_changes_nothing() {
+    let mut f = setup();
+    let result = f.vault.import(
+        f.env,
+        &entries(&[("A", "a"), ("B", "b"), ("A", "again")]),
+        &f.device,
+    );
+    match err(result) {
+        VaultError::DuplicateName(duplicate) => assert_eq!(duplicate, name("A")),
+        other => panic!("expected DuplicateName, got {other:?}"),
+    }
+    assert_eq!(read(&f, "A"), None);
+    assert_eq!(read(&f, "B"), None);
+    assert_eq!(revision(&f), 0);
+}
+
+#[test]
+fn import_with_wrong_key_changes_nothing() {
+    let mut f = setup();
+    let result = f
+        .vault
+        .import(f.env, &entries(&[("A", "a")]), &DeviceKey::generate());
+    assert!(matches!(err(result), VaultError::Key(KeyError::Unwrap)));
+    assert!(rows(&f.path).is_empty());
+}
+
+// --- C6: specific errors ---------------------------------------------------------
+
+#[test]
+fn duplicate_project_name_is_taken() {
+    let mut f = setup();
+    assert!(matches!(
+        err(f.vault.create_project("payments")),
+        VaultError::ProjectNameTaken
+    ));
+}
+
+#[test]
+fn unknown_environment_is_reported_by_every_operation() {
+    let mut f = setup();
+    let unknown = EnvironmentId::new();
+    let a = name("A");
+    let is_env_not_found = |error: VaultError| matches!(error, VaultError::EnvironmentNotFound);
+
+    assert!(is_env_not_found(err(f.vault.get(unknown, &a, &f.device))));
+    assert!(is_env_not_found(err(f.vault.list(unknown))));
+    assert!(is_env_not_found(err(f.vault.read_all(unknown, &f.device))));
+    assert!(is_env_not_found(err(f
+        .vault
+        .environment_recipients(unknown))));
+    assert!(is_env_not_found(err(f.vault.set(
+        unknown,
+        &a,
+        &value("v"),
+        &f.device
+    ))));
+    assert!(is_env_not_found(err(f.vault.import(
+        unknown,
+        &entries(&[("A", "a")]),
+        &f.device
+    ))));
 }

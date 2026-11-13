@@ -72,6 +72,7 @@ CREATE TABLE secrets (
     ciphertext     BLOB    NOT NULL CHECK (length(ciphertext) BETWEEN 16 AND 65552),
     updated_at     TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     deleted_at     TEXT,
+    inject         TEXT    NOT NULL DEFAULT 'shell' CHECK (inject IN ('shell', 'run')),
     UNIQUE (environment_id, name),
     FOREIGN KEY (environment_id, dek_version)
         REFERENCES environment_deks (environment_id, version)

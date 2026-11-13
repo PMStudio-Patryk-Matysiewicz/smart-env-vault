@@ -376,3 +376,22 @@ fn deleting_dek_version_deletes_its_wraps() {
     .unwrap();
     assert_eq!(count(&db, "dek_wraps"), 1);
 }
+
+#[test]
+fn secret_inject_is_a_closed_set() {
+    let db = seeded();
+    let inject: String = db
+        .query_row(
+            "SELECT inject FROM secrets WHERE key_id = ?1",
+            [KEY],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(inject, "shell");
+    db.execute("UPDATE secrets SET inject = 'run' WHERE key_id = ?1", [KEY])
+        .unwrap();
+    assert_constraint(db.execute(
+        "UPDATE secrets SET inject = 'hook' WHERE key_id = ?1",
+        [KEY],
+    ));
+}

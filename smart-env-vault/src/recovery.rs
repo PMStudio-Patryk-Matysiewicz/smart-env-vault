@@ -48,7 +48,7 @@ impl crate::Unwrapper for RecoveryKey {
     }
 
     fn public(&self) -> crate::PublicKey {
-        todo!()
+        RecoveryKey::public(self)
     }
 }
 

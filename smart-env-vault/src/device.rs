@@ -59,8 +59,9 @@ impl PublicKey {
     /// [`KeyError::InvalidPublicKey`] if the text is not a valid public key
     /// (surrounding whitespace is not accepted).
     pub fn parse(text: &str) -> Result<Self, KeyError> {
-        let _ = text;
-        todo!()
+        x25519::Recipient::from_str(text)
+            .map(Self)
+            .map_err(|_| KeyError::InvalidPublicKey)
     }
 
     pub(crate) fn recipient(&self) -> &x25519::Recipient {
@@ -101,7 +102,7 @@ impl crate::Unwrapper for DeviceKey {
     }
 
     fn public(&self) -> PublicKey {
-        todo!()
+        DeviceKey::public(self)
     }
 }
 

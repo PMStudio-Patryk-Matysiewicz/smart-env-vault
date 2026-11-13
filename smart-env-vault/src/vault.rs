@@ -2,6 +2,7 @@ use crate::{
     Aad, Dek, EncryptedValue, EnvironmentId, FORMAT_VERSION, KeyError, KeyId, ProjectId, PublicKey,
     RecipientId, SecretError, SecretValue, Unwrapper, VarName, VaultId, WrappedDek,
 };
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, ffi, params};
 use std::{fs::OpenOptions, path::Path};
 use thiserror::Error;
@@ -97,6 +98,27 @@ pub enum RecipientKind {
     Machine,
 }
 
+impl RecipientKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Device => "device",
+            Self::Recovery => "recovery",
+            Self::Machine => "machine",
+        }
+    }
+}
+
+impl FromSql for RecipientKind {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        match value.as_str()? {
+            "device" => Ok(Self::Device),
+            "recovery" => Ok(Self::Recovery),
+            "machine" => Ok(Self::Machine),
+            _ => Err(FromSqlError::InvalidType),
+        }
+    }
+}
+
 /// A public key the vault wraps environment DEKs for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Recipient {
@@ -158,7 +180,6 @@ struct StoredSecret {
     version: u32,
     nonce: Vec<u8>,
     ciphertext: Vec<u8>,
-    wrapped_dek: Vec<u8>,
 }
 
 /// Local encrypted secret store: one SQLite file holding only ciphertext and
@@ -240,15 +261,16 @@ impl Vault {
         Ok(id)
     }
 
-    /// Adds a recipient and wraps the active DEK of every existing
-    /// environment for it, in one transaction.
+    /// Adds a recipient and wraps every existing DEK version of every
+    /// environment for it, in one transaction (retired versions too, so
+    /// values not yet re-encrypted by a rotation stay readable).
     ///
     /// `key` must open all those DEKs (on an empty vault it is not used).
     /// New environments are wrapped for every active recipient
     /// automatically.
     ///
     /// # Errors
-    /// [`VaultError::Key`] (`Unwrap`) if `key` cannot open some environment —
+    /// [`VaultError::Key`] (`Unwrap`) if `key` cannot open some DEK —
     /// nothing is written; [`VaultError::NameTaken`] if this public key is
     /// already a recipient.
     pub fn add_recipient(
@@ -258,8 +280,34 @@ impl Vault {
         public_key: &PublicKey,
         key: &impl Unwrapper,
     ) -> Result<RecipientId, VaultError> {
-        let _ = (kind, label, public_key, key);
-        todo!()
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let id = RecipientId::new();
+        tx.execute(
+            "INSERT INTO recipients (id, vault_id, kind, label, public_key)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, self.id, kind.as_str(), label, public_key],
+        )?;
+
+        let deks = {
+            let mut statement = tx.prepare(
+                "SELECT d.environment_id, d.version
+                   FROM environment_deks d
+                   JOIN environments e ON e.id = d.environment_id
+                   JOIN projects p ON p.id = e.project_id
+                  WHERE p.vault_id = ?1",
+            )?;
+            statement
+                .query_map([self.id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<(EnvironmentId, u32)>, _>>()?
+        };
+        for (env, version) in deks {
+            let dek = dek_at(&tx, env, version, key)?;
+            store_wrap(&tx, env, version, &dek, id, public_key)?;
+        }
+        tx.commit()?;
+        Ok(id)
     }
 
     /// Revokes a recipient: it gets no envelope for new DEKs. Envelopes it
@@ -269,14 +317,27 @@ impl Vault {
     /// # Errors
     /// [`VaultError::NotFound`] for an unknown recipient.
     pub fn revoke_recipient(&mut self, id: RecipientId) -> Result<(), VaultError> {
-        let _ = id;
-        todo!()
+        let found = self.conn.execute(
+            "UPDATE recipients SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP)
+              WHERE id = ?1",
+            [id],
+        )?;
+        if found == 0 {
+            return Err(VaultError::NotFound);
+        }
+        Ok(())
     }
 
     /// All recipients of the vault, including revoked ones, in the order
     /// they were added.
     pub fn recipients(&self) -> Result<Vec<Recipient>, VaultError> {
-        todo!()
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT {RECIPIENT_COLUMNS} FROM recipients r ORDER BY r.rowid"
+        ))?;
+        let recipients = statement
+            .query_map([], recipient_from_row)?
+            .collect::<Result<_, _>>()?;
+        Ok(recipients)
     }
 
     /// Who can open the active DEK of an environment: every recipient with
@@ -285,8 +346,25 @@ impl Vault {
     /// # Errors
     /// [`VaultError::NotFound`] for an unknown environment.
     pub fn environment_recipients(&self, env: EnvironmentId) -> Result<Vec<Recipient>, VaultError> {
-        let _ = env;
-        todo!()
+        self.conn.query_row(
+            "SELECT 1 FROM environments WHERE id = ?1",
+            [env],
+            |_| Ok(()),
+        )?;
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT {RECIPIENT_COLUMNS}
+               FROM dek_wraps w
+               JOIN environment_deks d
+                 ON d.environment_id = w.environment_id AND d.version = w.dek_version
+                AND d.retired_at IS NULL
+               JOIN recipients r ON r.id = w.recipient_id
+              WHERE w.environment_id = ?1
+              ORDER BY r.rowid"
+        ))?;
+        let recipients = statement
+            .query_map([env], recipient_from_row)?
+            .collect::<Result<_, _>>()?;
+        Ok(recipients)
     }
 
     /// Creates an environment with a new DEK (version 1) wrapped separately
@@ -302,8 +380,37 @@ impl Vault {
         name: &str,
         kind: EnvKind,
     ) -> Result<EnvironmentId, VaultError> {
-        let _ = (project, name, kind.as_str());
-        todo!()
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let active = {
+            let mut statement = tx.prepare(
+                "SELECT id, public_key FROM recipients
+                  WHERE vault_id = ?1 AND revoked_at IS NULL ORDER BY rowid",
+            )?;
+            statement
+                .query_map([self.id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<(RecipientId, PublicKey)>, _>>()?
+        };
+        if active.is_empty() {
+            return Err(VaultError::NoRecipients);
+        }
+
+        let id = EnvironmentId::new();
+        tx.execute(
+            "INSERT INTO environments (id, project_id, name, kind) VALUES (?1, ?2, ?3, ?4)",
+            params![id, project, name, kind.as_str()],
+        )?;
+        tx.execute(
+            "INSERT INTO environment_deks (environment_id, version) VALUES (?1, 1)",
+            [id],
+        )?;
+        let dek = Dek::generate()?;
+        for (recipient, public_key) in &active {
+            store_wrap(&tx, id, 1, &dek, *recipient, public_key)?;
+        }
+        tx.commit()?;
+        Ok(id)
     }
 
     /// Saves a secret: creates it or overwrites its value.
@@ -353,11 +460,9 @@ impl Vault {
             .conn
             .query_row(
                 "SELECT s.key_id, e.project_id, s.format_version, s.dek_version, s.version,
-                        s.nonce, s.ciphertext, d.wrapped
+                        s.nonce, s.ciphertext
                    FROM secrets s
                    JOIN environments e ON e.id = s.environment_id
-                   JOIN environment_deks d
-                     ON d.environment_id = s.environment_id AND d.version = s.dek_version
                   WHERE s.environment_id = ?1 AND s.name = ?2 AND s.deleted_at IS NULL",
                 params![env, name.as_str()],
                 |row| {
@@ -369,7 +474,6 @@ impl Vault {
                         version: row.get(4)?,
                         nonce: row.get(5)?,
                         ciphertext: row.get(6)?,
-                        wrapped_dek: row.get(7)?,
                     })
                 },
             )
@@ -378,7 +482,7 @@ impl Vault {
             return Ok(None);
         };
 
-        let dek = Dek::unwrap(&WrappedDek::from_bytes(stored.wrapped_dek), key)?;
+        let dek = dek_at(&self.conn, env, stored.dek_version, key)?;
         let sealed = EncryptedValue {
             nonce: stored.nonce.try_into().map_err(|_| SecretError::Decrypt)?,
             ciphertext: stored.ciphertext,
@@ -651,15 +755,15 @@ fn active_dek(
     env: EnvironmentId,
     key: &impl Unwrapper,
 ) -> Result<ActiveDek, VaultError> {
-    let (project, version, wrapped): (ProjectId, u32, Vec<u8>) = conn.query_row(
-        "SELECT e.project_id, d.version, d.wrapped
+    let (project, version): (ProjectId, u32) = conn.query_row(
+        "SELECT e.project_id, d.version
            FROM environments e
            JOIN environment_deks d ON d.environment_id = e.id AND d.retired_at IS NULL
           WHERE e.id = ?1",
         [env],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    let dek = Dek::unwrap(&WrappedDek::from_bytes(wrapped), key)?;
+    let dek = dek_at(conn, env, version, key)?;
     Ok(ActiveDek {
         project,
         version,
@@ -667,20 +771,60 @@ fn active_dek(
     })
 }
 
-/// Unwraps a specific (possibly retired) DEK version of an environment.
+/// Unwraps a specific (possibly retired) DEK version of an environment with
+/// the caller's own envelope, found by its public key.
+///
+/// No envelope for this key is [`KeyError::Unwrap`] — the same as a key
+/// that fails to open one — so a stranger cannot tell the two apart.
 fn dek_at(
     conn: &Connection,
     env: EnvironmentId,
     version: u32,
     key: &impl Unwrapper,
 ) -> Result<Dek, VaultError> {
-    let wrapped: Vec<u8> = conn.query_row(
-        "SELECT wrapped FROM environment_deks WHERE environment_id = ?1 AND version = ?2",
-        params![env, version],
-        |row| row.get(0),
-    )?;
+    let wrapped: Vec<u8> = conn
+        .query_row(
+            "SELECT w.wrapped
+               FROM dek_wraps w
+               JOIN recipients r ON r.id = w.recipient_id
+              WHERE w.environment_id = ?1 AND w.dek_version = ?2 AND r.public_key = ?3",
+            params![env, version, key.public()],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or(KeyError::Unwrap)?;
     Ok(Dek::unwrap(&WrappedDek::from_bytes(wrapped), key)?)
 }
+
+/// Wraps `dek` for one recipient and stores the envelope.
+fn store_wrap(
+    conn: &Connection,
+    env: EnvironmentId,
+    dek_version: u32,
+    dek: &Dek,
+    recipient: RecipientId,
+    public_key: &PublicKey,
+) -> Result<(), VaultError> {
+    let wrapped = dek.wrap(&[public_key])?;
+    conn.execute(
+        "INSERT INTO dek_wraps (environment_id, dek_version, recipient_id, wrapped)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![env, dek_version, recipient, wrapped.as_bytes()],
+    )?;
+    Ok(())
+}
+
+fn recipient_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Recipient> {
+    Ok(Recipient {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        label: row.get(2)?,
+        public_key: row.get(3)?,
+        revoked: row.get(4)?,
+    })
+}
+
+const RECIPIENT_COLUMNS: &str = "r.id, r.kind, r.label, r.public_key, r.revoked_at IS NOT NULL";
 
 fn current(
     conn: &Connection,

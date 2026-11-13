@@ -9,6 +9,7 @@
 //! ```
 //!
 //! Entry point: [`Vault`]. The database holds only ciphertext and wrapped keys.
+#![forbid(unsafe_code)]
 
 mod dek;
 mod device;

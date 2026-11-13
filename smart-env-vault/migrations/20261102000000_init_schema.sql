@@ -20,6 +20,7 @@ CREATE TABLE environments (
     kind       TEXT NOT NULL CHECK (kind IN ('dev', 'staging', 'prod', 'custom')),
     protected  INTEGER NOT NULL DEFAULT 0 CHECK (protected IN (0, 1)),
     access     TEXT NOT NULL DEFAULT 'direct' CHECK (access IN ('direct', 'proxied')),
+    revision   INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (project_id, name)
 ) STRICT;
@@ -47,10 +48,23 @@ CREATE TABLE secrets (
                    ),
     format_version INTEGER NOT NULL CHECK (format_version >= 1),
     dek_version    INTEGER NOT NULL,
+    version        INTEGER NOT NULL CHECK (version >= 1),
     nonce          BLOB    NOT NULL CHECK (length(nonce) = 12),
     ciphertext     BLOB    NOT NULL CHECK (length(ciphertext) BETWEEN 16 AND 65552),
     updated_at     TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted_at     TEXT,
     UNIQUE (environment_id, name),
     FOREIGN KEY (environment_id, dek_version)
         REFERENCES environment_deks (environment_id, version)
+) STRICT;
+
+CREATE TABLE secret_versions (
+    key_id         BLOB    NOT NULL REFERENCES secrets(key_id) ON DELETE CASCADE,
+    version        INTEGER NOT NULL CHECK (version >= 1),
+    format_version INTEGER NOT NULL CHECK (format_version >= 1),
+    dek_version    INTEGER NOT NULL,
+    nonce          BLOB    NOT NULL CHECK (length(nonce) = 12),
+    ciphertext     BLOB    NOT NULL CHECK (length(ciphertext) BETWEEN 16 AND 65552),
+    created_at     TEXT    NOT NULL,
+    PRIMARY KEY (key_id, version)
 ) STRICT;

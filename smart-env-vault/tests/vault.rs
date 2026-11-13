@@ -1,7 +1,7 @@
 use rusqlite::{Connection, params};
 use smart_env_vault::{
-    DeviceKey, EnvKind, EnvironmentId, KeyError, ProjectId, RecoveryKey, SecretError, SecretValue,
-    VarName, Vault, VaultError,
+    DeviceKey, EnvKind, EnvironmentId, HISTORY_LIMIT, KeyError, ProjectId, RecoveryKey,
+    SecretError, SecretValue, SetOutcome, VarName, Vault, VaultError,
 };
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -217,7 +217,7 @@ fn overwrite_keeps_key_id_and_changes_nonce() {
         .set(f.env, &name("A"), &value("v"), &f.device)
         .unwrap();
     let after = sealed(&f.path, f.env, "A");
-    assert_eq!(first, second);
+    assert_eq!(first.key_id, second.key_id);
     assert_ne!(before.0, after.0);
     assert_ne!(before.1, after.1);
 }
@@ -385,7 +385,8 @@ fn rename_keeps_ciphertext_and_value() {
     let key_id = f
         .vault
         .set(f.env, &name("OLD"), &value("v"), &f.device)
-        .unwrap();
+        .unwrap()
+        .key_id;
     let before = sealed(&f.path, f.env, "OLD");
 
     f.vault.rename(f.env, &name("OLD"), &name("NEW")).unwrap();
@@ -429,4 +430,342 @@ fn rename_missing_secret_is_not_found() {
     let mut f = setup();
     let result = f.vault.rename(f.env, &name("NOPE"), &name("OTHER"));
     assert!(matches!(err(result), VaultError::NotFound));
+}
+
+fn put(f: &mut Fixture, var: &str, text: &str) -> SetOutcome {
+    f.vault
+        .set(f.env, &name(var), &value(text), &f.device)
+        .unwrap()
+}
+
+fn read(f: &Fixture, var: &str) -> Option<String> {
+    f.vault
+        .get(f.env, &name(var), &f.device)
+        .unwrap()
+        .map(|v| v.expose().to_owned())
+}
+
+fn revision(f: &Fixture) -> u64 {
+    f.vault.revision(f.env).unwrap()
+}
+
+fn versions(f: &Fixture, var: &str) -> Vec<u32> {
+    f.vault
+        .history(f.env, &name(var))
+        .unwrap()
+        .into_iter()
+        .map(|meta| meta.version)
+        .collect()
+}
+
+/// Number of rows in `secret_versions`, read directly from the file.
+fn history_rows(path: &Path) -> i64 {
+    raw(path)
+        .query_row("SELECT count(*) FROM secret_versions", [], |row| row.get(0))
+        .unwrap()
+}
+
+#[test]
+fn versions_grow_with_each_set() {
+    let mut f = setup();
+    let first = put(&mut f, "A", "a");
+    let second = put(&mut f, "A", "b");
+    let third = put(&mut f, "A", "b"); // same value → still a new version
+    assert_eq!([first.version, second.version, third.version], [1, 2, 3]);
+    assert_eq!(first.key_id, third.key_id);
+    assert_eq!(read(&f, "A").as_deref(), Some("b"));
+}
+
+#[test]
+fn every_change_bumps_revision_exactly_once() {
+    let mut f = setup();
+    assert_eq!(revision(&f), 0);
+    put(&mut f, "A", "a");
+    assert_eq!(revision(&f), 1);
+    put(&mut f, "A", "b");
+    assert_eq!(revision(&f), 2);
+    f.vault.rename(f.env, &name("A"), &name("B")).unwrap();
+    assert_eq!(revision(&f), 3);
+    assert!(f.vault.remove(f.env, &name("B")).unwrap());
+    assert_eq!(revision(&f), 4);
+    assert!(!f.vault.remove(f.env, &name("NOPE")).unwrap());
+    assert_eq!(revision(&f), 4);
+}
+
+#[test]
+fn revision_is_per_environment() {
+    let mut f = setup();
+    let staging = f
+        .vault
+        .create_environment(
+            f.project,
+            "staging",
+            EnvKind::Staging,
+            &[&f.device.public()],
+        )
+        .unwrap();
+    put(&mut f, "A", "a");
+    assert_eq!(f.vault.revision(staging).unwrap(), 0);
+}
+
+#[test]
+fn wrong_key_set_does_not_bump_revision() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    let result = f
+        .vault
+        .set(f.env, &name("A"), &value("evil"), &DeviceKey::generate());
+    assert!(matches!(err(result), VaultError::Key(KeyError::Unwrap)));
+    assert_eq!(revision(&f), 1);
+}
+
+#[test]
+fn rename_keeps_version_and_value() {
+    let mut f = setup();
+    put(&mut f, "OLD", "a");
+    put(&mut f, "OLD", "b");
+    f.vault.rename(f.env, &name("OLD"), &name("NEW")).unwrap();
+    assert_eq!(read(&f, "NEW").as_deref(), Some("b"));
+    assert_eq!(f.vault.list(f.env).unwrap()[0].version, 2);
+}
+
+#[test]
+fn revision_of_unknown_environment_is_not_found() {
+    let f = setup();
+    assert!(matches!(
+        err(f.vault.revision(EnvironmentId::new())),
+        VaultError::NotFound
+    ));
+}
+
+#[test]
+fn history_lists_current_and_previous_versions_newest_first() {
+    let mut f = setup();
+    for text in ["v1", "v2", "v3"] {
+        put(&mut f, "A", text);
+    }
+    assert_eq!(versions(&f, "A"), [3, 2, 1]);
+}
+
+#[test]
+fn history_is_capped_at_limit() {
+    let mut f = setup();
+    for i in 1..=12 {
+        put(&mut f, "A", &format!("v{i}"));
+    }
+    let expected: Vec<u32> = (2..=12).rev().collect();
+    assert_eq!(expected.len(), HISTORY_LIMIT + 1);
+    assert_eq!(versions(&f, "A"), expected);
+    assert_eq!(history_rows(&f.path), HISTORY_LIMIT as i64);
+}
+
+#[test]
+fn history_never_stores_plaintext() {
+    let mut f = setup();
+    let markers: Vec<String> = (1..=12)
+        .map(|i| format!("PLAINTEXT-MARKER-{i:02}"))
+        .collect();
+    for marker in &markers {
+        put(&mut f, "A", marker);
+    }
+    assert_eq!(versions(&f, "A").len(), HISTORY_LIMIT + 1);
+    let Fixture { dir, vault, .. } = f;
+    drop(vault);
+
+    for entry in std::fs::read_dir(dir.path()).unwrap() {
+        let path = entry.unwrap().path();
+        let bytes = std::fs::read(&path).unwrap();
+        for marker in &markers {
+            assert!(
+                !bytes.windows(marker.len()).any(|w| w == marker.as_bytes()),
+                "{marker} found in {}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn old_version_swapped_in_as_current_is_rejected() {
+    let mut f = setup();
+    let outcome = put(&mut f, "A", "a");
+    put(&mut f, "A", "b");
+    // An attacker with disk access puts the version-1 ciphertext back as current.
+    let old: (Vec<u8>, Vec<u8>) = raw(&f.path)
+        .query_row(
+            "SELECT nonce, ciphertext FROM secret_versions WHERE key_id = ?1 AND version = 1",
+            [&outcome.key_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    reseal(&f.path, f.env, "A", &old);
+
+    let result = f.vault.get(f.env, &name("A"), &f.device);
+    assert!(matches!(
+        err(result),
+        VaultError::Secret(SecretError::Decrypt)
+    ));
+}
+
+#[test]
+fn history_of_missing_secret_is_not_found() {
+    let f = setup();
+    assert!(matches!(
+        err(f.vault.history(f.env, &name("NOPE"))),
+        VaultError::NotFound
+    ));
+}
+
+#[test]
+fn undo_restores_previous_value_as_new_version() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    put(&mut f, "A", "b");
+    assert_eq!(f.vault.undo(f.env, &name("A"), &f.device).unwrap(), 3);
+    assert_eq!(read(&f, "A").as_deref(), Some("a"));
+    assert_eq!(versions(&f, "A"), [3, 2, 1]);
+    assert_eq!(revision(&f), 3);
+}
+
+#[test]
+fn second_undo_reverts_the_first() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    put(&mut f, "A", "b");
+    f.vault.undo(f.env, &name("A"), &f.device).unwrap();
+    assert_eq!(f.vault.undo(f.env, &name("A"), &f.device).unwrap(), 4);
+    assert_eq!(read(&f, "A").as_deref(), Some("b"));
+}
+
+#[test]
+fn removed_secret_is_hidden_but_kept() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    assert!(f.vault.remove(f.env, &name("A")).unwrap());
+    assert_eq!(read(&f, "A"), None);
+    assert!(f.vault.list(f.env).unwrap().is_empty());
+    assert!(matches!(
+        err(f.vault.history(f.env, &name("A"))),
+        VaultError::NotFound
+    ));
+    assert_eq!(rows(&f.path).len(), 1, "soft delete keeps the row");
+}
+
+#[test]
+fn undo_after_remove_restores_secret() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    f.vault.remove(f.env, &name("A")).unwrap();
+    assert_eq!(f.vault.undo(f.env, &name("A"), &f.device).unwrap(), 1);
+    assert_eq!(read(&f, "A").as_deref(), Some("a"));
+    assert_eq!(revision(&f), 3);
+}
+
+#[test]
+fn undo_without_history_fails() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    assert!(matches!(
+        err(f.vault.undo(f.env, &name("A"), &f.device)),
+        VaultError::NothingToUndo
+    ));
+    assert_eq!(revision(&f), 1);
+}
+
+#[test]
+fn undo_of_missing_secret_is_not_found() {
+    let mut f = setup();
+    assert!(matches!(
+        err(f.vault.undo(f.env, &name("NOPE"), &f.device)),
+        VaultError::NotFound
+    ));
+}
+
+#[test]
+fn undo_after_purge_is_not_found() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    put(&mut f, "A", "b");
+    assert!(f.vault.purge(f.env, &name("A")).unwrap());
+    assert!(matches!(
+        err(f.vault.undo(f.env, &name("A"), &f.device)),
+        VaultError::NotFound
+    ));
+}
+
+#[test]
+fn wrong_key_undo_changes_nothing() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    put(&mut f, "A", "b");
+    let before = (rows(&f.path), history_rows(&f.path), revision(&f));
+
+    let result = f.vault.undo(f.env, &name("A"), &DeviceKey::generate());
+    assert!(matches!(err(result), VaultError::Key(KeyError::Unwrap)));
+
+    assert_eq!((rows(&f.path), history_rows(&f.path), revision(&f)), before);
+    assert_eq!(read(&f, "A").as_deref(), Some("b"));
+}
+
+#[test]
+fn set_on_removed_name_resurrects_with_history() {
+    let mut f = setup();
+    let first = put(&mut f, "A", "a");
+    f.vault.remove(f.env, &name("A")).unwrap();
+    let second = put(&mut f, "A", "b");
+    assert_eq!(second.key_id, first.key_id);
+    assert_eq!(second.version, 2);
+    f.vault.undo(f.env, &name("A"), &f.device).unwrap();
+    assert_eq!(read(&f, "A").as_deref(), Some("a"));
+}
+
+#[test]
+fn rename_onto_removed_name_is_taken() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    put(&mut f, "B", "b");
+    f.vault.remove(f.env, &name("B")).unwrap();
+
+    let result = f.vault.rename(f.env, &name("A"), &name("B"));
+    assert!(matches!(err(result), VaultError::NameTaken));
+
+    f.vault.undo(f.env, &name("B"), &f.device).unwrap();
+    assert_eq!(read(&f, "A").as_deref(), Some("a"));
+    assert_eq!(read(&f, "B").as_deref(), Some("b"));
+}
+
+#[test]
+fn rename_of_removed_secret_is_not_found() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    f.vault.remove(f.env, &name("A")).unwrap();
+    let result = f.vault.rename(f.env, &name("A"), &name("B"));
+    assert!(matches!(err(result), VaultError::NotFound));
+}
+
+#[test]
+fn purge_removes_secret_and_history() {
+    let mut f = setup();
+    for text in ["a", "b", "c"] {
+        put(&mut f, "A", text);
+    }
+    assert!(f.vault.purge(f.env, &name("A")).unwrap());
+    assert!(matches!(
+        err(f.vault.history(f.env, &name("A"))),
+        VaultError::NotFound
+    ));
+    assert!(rows(&f.path).is_empty());
+    assert_eq!(history_rows(&f.path), 0);
+    assert_eq!(revision(&f), 4);
+    assert!(!f.vault.purge(f.env, &name("A")).unwrap());
+    assert_eq!(revision(&f), 4);
+}
+
+#[test]
+fn purge_works_on_removed_secret() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    f.vault.remove(f.env, &name("A")).unwrap();
+    assert!(f.vault.purge(f.env, &name("A")).unwrap());
+    assert!(rows(&f.path).is_empty());
 }

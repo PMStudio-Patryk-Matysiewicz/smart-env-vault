@@ -24,6 +24,9 @@ pub enum VaultError {
     /// The name is already used in this scope (`UNIQUE` violation).
     #[error("name already taken")]
     NameTaken,
+    /// [`Vault::undo`] found no previous version of the secret.
+    #[error("no previous version to restore")]
+    NothingToUndo,
     /// Key error, e.g. [`KeyError::Unwrap`] when the key cannot open the environment DEK.
     #[error(transparent)]
     Key(#[from] KeyError),
@@ -86,8 +89,33 @@ pub struct SecretMeta {
     pub name: VarName,
     /// Stable identity of the secret.
     pub key_id: KeyId,
+    /// Version of the current value.
+    pub version: u32,
     /// Time of the last value change (UTC, `YYYY-MM-DD HH:MM:SS`).
     pub updated_at: String,
+}
+
+/// How many previous values [`Vault`] keeps per secret (the current value
+/// does not count).
+pub const HISTORY_LIMIT: usize = 10;
+
+/// Result of [`Vault::set`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SetOutcome {
+    /// Stable identity of the secret (kept when overwriting).
+    pub key_id: KeyId,
+    /// Version of the value just written: 1 for a new secret, then +1.
+    pub version: u32,
+}
+
+/// One entry of [`Vault::history`]: a version and when it was written, never
+/// the value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VersionMeta {
+    /// Version number of the value.
+    pub version: u32,
+    /// When this version was written (UTC, `YYYY-MM-DD HH:MM:SS`).
+    pub created_at: String,
 }
 
 /// A secret row together with everything needed to rebuild its AAD.
@@ -96,6 +124,7 @@ struct StoredSecret {
     project: ProjectId,
     format_version: u32,
     dek_version: u32,
+    version: u32,
     nonce: Vec<u8>,
     ciphertext: Vec<u8>,
     wrapped_dek: Vec<u8>,
@@ -213,8 +242,11 @@ impl Vault {
     /// Saves a secret: creates it or overwrites its value.
     ///
     /// Encrypts with the active DEK and a fresh nonce. Unwraps the DEK before
-    /// writing anything. Overwriting keeps the existing [`KeyId`]. Returns the
-    /// secret's [`KeyId`].
+    /// writing anything. Overwriting keeps the existing [`KeyId`], moves the
+    /// previous value to the history (at most [`HISTORY_LIMIT`] kept) and
+    /// increments the version; setting a removed name brings the secret back
+    /// with its history. Every successful call increments the environment
+    /// [`revision`](Vault::revision).
     ///
     /// # Errors
     /// [`VaultError::Key`] (`Unwrap`) for a wrong key — nothing is written;
@@ -225,7 +257,7 @@ impl Vault {
         name: &VarName,
         value: &SecretValue,
         key: &impl Unwrapper,
-    ) -> Result<KeyId, VaultError> {
+    ) -> Result<SetOutcome, VaultError> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -256,13 +288,14 @@ impl Vault {
             environment: env,
             key: key_id,
             dek_version,
+            version: 1,
         };
         let sealed = dek.encrypt(value, &aad)?;
 
         tx.execute(
             "INSERT INTO secrets
-                 (key_id, environment_id, name, format_version, dek_version, nonce, ciphertext)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 (key_id, environment_id, name, format_version, dek_version, version, nonce, ciphertext)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)
              ON CONFLICT (environment_id, name) DO UPDATE SET
                  format_version = excluded.format_version,
                  dek_version    = excluded.dek_version,
@@ -280,7 +313,7 @@ impl Vault {
             ],
         )?;
         tx.commit()?;
-        Ok(key_id)
+        Ok(SetOutcome { key_id, version: 1 })
     }
 
     /// Reads and decrypts a secret; `Ok(None)` if no secret has this name.
@@ -300,7 +333,7 @@ impl Vault {
         let stored = self
             .conn
             .query_row(
-                "SELECT s.key_id, e.project_id, s.format_version, s.dek_version,
+                "SELECT s.key_id, e.project_id, s.format_version, s.dek_version, s.version,
                         s.nonce, s.ciphertext, d.wrapped
                    FROM secrets s
                    JOIN environments e ON e.id = s.environment_id
@@ -314,9 +347,10 @@ impl Vault {
                         project: row.get(1)?,
                         format_version: row.get(2)?,
                         dek_version: row.get(3)?,
-                        nonce: row.get(4)?,
-                        ciphertext: row.get(5)?,
-                        wrapped_dek: row.get(6)?,
+                        version: row.get(4)?,
+                        nonce: row.get(5)?,
+                        ciphertext: row.get(6)?,
+                        wrapped_dek: row.get(7)?,
                     })
                 },
             )
@@ -337,6 +371,7 @@ impl Vault {
             environment: env,
             key: stored.key_id,
             dek_version: stored.dek_version,
+            version: stored.version,
         };
         Ok(Some(dek.decrypt(&sealed, &aad)?))
     }
@@ -344,25 +379,36 @@ impl Vault {
     /// Lists names without a key and without decrypting, sorted by name.
     pub fn list(&self, env: EnvironmentId) -> Result<Vec<SecretMeta>, VaultError> {
         let mut statement = self.conn.prepare(
-            "SELECT name, key_id, updated_at FROM secrets WHERE environment_id = ?1 ORDER BY name",
+            "SELECT name, key_id, version, updated_at
+               FROM secrets WHERE environment_id = ?1 ORDER BY name",
         )?;
         let rows = statement
             .query_map([env], |row| {
-                Ok((row.get::<_, String>(0)?, row.get(1)?, row.get(2)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter()
-            .map(|(name, key_id, updated_at)| {
+            .map(|(name, key_id, version, updated_at)| {
                 Ok(SecretMeta {
                     name: VarName::parse(&name)?,
                     key_id,
+                    version,
                     updated_at,
                 })
             })
             .collect()
     }
 
-    /// Deletes a secret. Returns `true` if it existed, `false` otherwise.
+    /// Soft-deletes a secret: it disappears from [`get`](Vault::get),
+    /// [`list`](Vault::list) and [`history`](Vault::history), but the value and
+    /// its history stay until [`purge`](Vault::purge), so [`undo`](Vault::undo)
+    /// can bring it back. Returns `true` if a live secret was removed (and the
+    /// [`revision`](Vault::revision) incremented), `false` otherwise.
     pub fn remove(&mut self, env: EnvironmentId, name: &VarName) -> Result<bool, VaultError> {
         let deleted = self.conn.execute(
             "DELETE FROM secrets WHERE environment_id = ?1 AND name = ?2",
@@ -372,11 +418,13 @@ impl Vault {
     }
 
     /// Renames a secret without re-encrypting it: only the label changes,
-    /// while `key_id`, nonce and ciphertext stay unchanged.
+    /// while `key_id`, version, nonce and ciphertext stay unchanged.
+    /// Increments the environment [`revision`](Vault::revision).
     ///
     /// # Errors
-    /// [`VaultError::NotFound`] if `from` does not exist, [`VaultError::NameTaken`]
-    /// if `to` is already used (both secrets stay intact).
+    /// [`VaultError::NotFound`] if `from` does not exist or was removed,
+    /// [`VaultError::NameTaken`] if `to` is used, also by a removed secret
+    /// (both secrets stay intact).
     pub fn rename(
         &mut self,
         env: EnvironmentId,
@@ -391,6 +439,63 @@ impl Vault {
             return Err(VaultError::NotFound);
         }
         Ok(())
+    }
+
+    /// Change counter of an environment: starts at 0 and grows by exactly 1
+    /// with every successful change of its secrets (`set`, `remove`, `rename`,
+    /// `undo`, `purge`). Lets callers detect changes without decrypting.
+    ///
+    /// # Errors
+    /// [`VaultError::NotFound`] for an unknown environment.
+    pub fn revision(&self, env: EnvironmentId) -> Result<u64, VaultError> {
+        let _ = env;
+        todo!()
+    }
+
+    /// Versions of a secret, newest first: the current one followed by up to
+    /// [`HISTORY_LIMIT`] previous ones. No key needed; never returns values.
+    ///
+    /// # Errors
+    /// [`VaultError::NotFound`] if the secret does not exist or was removed.
+    pub fn history(
+        &self,
+        env: EnvironmentId,
+        name: &VarName,
+    ) -> Result<Vec<VersionMeta>, VaultError> {
+        let _ = (env, name);
+        todo!()
+    }
+
+    /// Restores the previous state of a secret. History only grows:
+    ///
+    /// - a removed secret comes back with its value and version unchanged;
+    /// - otherwise the newest previous value is written as a new version, and
+    ///   the current one moves to the history (so a second `undo` reverts the
+    ///   first).
+    ///
+    /// Unwraps the DEK before writing anything. Returns the version after the
+    /// operation and increments the environment [`revision`](Vault::revision).
+    ///
+    /// # Errors
+    /// [`VaultError::NotFound`] if the secret does not exist (or was purged),
+    /// [`VaultError::NothingToUndo`] if there is no previous version,
+    /// [`VaultError::Key`] (`Unwrap`) for a wrong key — nothing is written.
+    pub fn undo(
+        &mut self,
+        env: EnvironmentId,
+        name: &VarName,
+        key: &impl Unwrapper,
+    ) -> Result<u32, VaultError> {
+        let _ = (env, name, key);
+        todo!()
+    }
+
+    /// Deletes a secret permanently, together with its history; works on
+    /// removed secrets too. Returns `true` if something was deleted (and the
+    /// [`revision`](Vault::revision) incremented).
+    pub fn purge(&mut self, env: EnvironmentId, name: &VarName) -> Result<bool, VaultError> {
+        let _ = (env, name);
+        todo!()
     }
 }
 

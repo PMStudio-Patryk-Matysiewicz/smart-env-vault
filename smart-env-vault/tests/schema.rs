@@ -51,8 +51,8 @@ fn insert_secret(
     ciphertext: &[u8],
 ) -> rusqlite::Result<usize> {
     db.execute(
-        "INSERT INTO secrets (key_id, environment_id, name, format_version, dek_version, nonce, ciphertext)
-         VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6)",
+        "INSERT INTO secrets (key_id, environment_id, name, format_version, dek_version, version, nonce, ciphertext)
+         VALUES (?1, ?2, ?3, 1, ?4, 1, ?5, ?6)",
         params![key_id, ENV, name, dek_version, nonce, ciphertext],
     )
 }
@@ -240,12 +240,69 @@ fn rename_keeps_key_id() {
     assert_eq!(key_id, KEY);
 }
 
+fn insert_version(db: &Connection, version: i64) -> rusqlite::Result<usize> {
+    db.execute(
+        "INSERT INTO secret_versions (key_id, version, format_version, dek_version, nonce, ciphertext, created_at)
+         VALUES (?1, ?2, 1, 1, ?3, ?4, CURRENT_TIMESTAMP)",
+        params![KEY, version, [0u8; 12], [0u8; 20]],
+    )
+}
+
+#[test]
+fn secret_version_must_be_positive() {
+    let db = seeded();
+    assert_constraint(db.execute("UPDATE secrets SET version = 0 WHERE key_id = ?1", [KEY]));
+    assert_constraint(insert_version(&db, 0));
+}
+
+#[test]
+fn environment_revision_starts_at_zero_and_cannot_go_negative() {
+    let db = seeded();
+    let revision: i64 = db
+        .query_row(
+            "SELECT revision FROM environments WHERE id = ?1",
+            [ENV],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(revision, 0);
+    assert_constraint(db.execute("UPDATE environments SET revision = -1 WHERE id = ?1", [ENV]));
+}
+
+#[test]
+fn history_belongs_to_an_existing_secret_once_per_version() {
+    let db = seeded();
+    insert_version(&db, 1).unwrap();
+    assert_constraint(insert_version(&db, 1));
+    assert_constraint(db.execute(
+        "INSERT INTO secret_versions (key_id, version, format_version, dek_version, nonce, ciphertext, created_at)
+         VALUES (?1, 1, 1, 1, ?2, ?3, CURRENT_TIMESTAMP)",
+        params![id(9), [0u8; 12], [0u8; 20]],
+    ));
+}
+
+#[test]
+fn deleting_secret_deletes_its_history() {
+    let db = seeded();
+    insert_version(&db, 1).unwrap();
+    db.execute("DELETE FROM secrets WHERE key_id = ?1", [KEY])
+        .unwrap();
+    assert_eq!(count(&db, "secret_versions"), 0);
+}
+
 #[test]
 fn deleting_vault_cascades_to_everything() {
     let db = seeded();
+    insert_version(&db, 1).unwrap();
     db.execute("DELETE FROM vaults WHERE id = ?1", [VAULT])
         .unwrap();
-    for table in ["projects", "environments", "environment_deks", "secrets"] {
+    for table in [
+        "projects",
+        "environments",
+        "environment_deks",
+        "secrets",
+        "secret_versions",
+    ] {
         assert_eq!(count(&db, table), 0, "{table} not emptied");
     }
 }

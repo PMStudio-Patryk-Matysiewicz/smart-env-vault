@@ -29,4 +29,4 @@ pub use secret::{
     VarName,
 };
 pub use store::{KeyStore, KeychainStore, MemoryStore, PassphraseFileStore};
-pub use vault::{EnvKind, SecretMeta, Vault, VaultError};
+pub use vault::{EnvKind, HISTORY_LIMIT, SecretMeta, SetOutcome, Vault, VaultError, VersionMeta};

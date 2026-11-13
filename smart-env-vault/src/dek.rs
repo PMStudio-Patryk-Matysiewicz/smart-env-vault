@@ -244,6 +244,7 @@ mod tests {
                 environment: EnvironmentId::new(),
                 key: KeyId::new(),
                 dek_version: 1,
+                version: 1,
             }
         }
 
@@ -329,6 +330,7 @@ mod tests {
                     dek_version: 2,
                     ..aad
                 },
+                Aad { version: 2, ..aad },
             ];
             for other in variants {
                 assert_eq!(

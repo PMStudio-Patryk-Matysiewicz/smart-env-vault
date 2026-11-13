@@ -9,6 +9,7 @@
 //! ```
 //!
 //! Entry point: [`Vault`]. The database holds only ciphertext and wrapped keys.
+#![forbid(unsafe_code)]
 
 mod dek;
 mod device;
@@ -29,4 +30,4 @@ pub use secret::{
     VarName,
 };
 pub use store::{KeyStore, KeychainStore, MemoryStore, PassphraseFileStore};
-pub use vault::{EnvKind, SecretMeta, Vault, VaultError};
+pub use vault::{EnvKind, HISTORY_LIMIT, SecretMeta, SetOutcome, Vault, VaultError, VersionMeta};

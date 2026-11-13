@@ -137,21 +137,26 @@ pub struct Aad {
     pub key: KeyId,
     /// Version of the environment DEK used for encryption.
     pub dek_version: u32,
+    /// Version of the secret value (1, 2, 3…), so an older value of the same
+    /// secret cannot be swapped in as the current one.
+    pub version: u32,
 }
 
 impl Aad {
-    /// Canonical fixed-length encoding (72 bytes):
-    /// `format_version` u32 BE | vault | project | environment | key (16 B each) | `dek_version` u32 BE.
+    /// Canonical fixed-length encoding (76 bytes):
+    /// `format_version` u32 BE | vault | project | environment | key (16 B each)
+    /// | `dek_version` u32 BE | `version` u32 BE.
     ///
     /// Fixed length makes the concatenation unambiguous.
-    pub fn to_bytes(&self) -> [u8; 72] {
-        let mut bytes = [0u8; 72];
+    pub fn to_bytes(&self) -> [u8; 76] {
+        let mut bytes = [0u8; 76];
         bytes[0..4].copy_from_slice(&self.format_version.to_be_bytes());
         bytes[4..20].copy_from_slice(self.vault.as_bytes());
         bytes[20..36].copy_from_slice(self.project.as_bytes());
         bytes[36..52].copy_from_slice(self.environment.as_bytes());
         bytes[52..68].copy_from_slice(self.key.as_bytes());
         bytes[68..72].copy_from_slice(&self.dek_version.to_be_bytes());
+        bytes[72..76].copy_from_slice(&self.version.to_be_bytes());
         bytes
     }
 }
@@ -233,13 +238,16 @@ mod tests {
             environment: EnvironmentId::new(),
             key: KeyId::new(),
             dek_version: 7,
+            version: 0x0102_0304,
         };
         let bytes = aad.to_bytes();
+        assert_eq!(bytes.len(), 76);
         assert_eq!(&bytes[0..4], &1u32.to_be_bytes());
         assert_eq!(&bytes[4..20], aad.vault.as_bytes());
         assert_eq!(&bytes[20..36], aad.project.as_bytes());
         assert_eq!(&bytes[36..52], aad.environment.as_bytes());
         assert_eq!(&bytes[52..68], aad.key.as_bytes());
         assert_eq!(&bytes[68..72], &7u32.to_be_bytes());
+        assert_eq!(&bytes[72..76], &[1, 2, 3, 4]);
     }
 }

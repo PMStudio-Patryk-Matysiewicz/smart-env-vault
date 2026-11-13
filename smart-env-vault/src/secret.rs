@@ -156,6 +156,7 @@ impl Aad {
         bytes[36..52].copy_from_slice(self.environment.as_bytes());
         bytes[52..68].copy_from_slice(self.key.as_bytes());
         bytes[68..72].copy_from_slice(&self.dek_version.to_be_bytes());
+        bytes[72..76].copy_from_slice(&self.version.to_be_bytes());
         bytes
     }
 }

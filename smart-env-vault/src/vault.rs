@@ -261,59 +261,11 @@ impl Vault {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-
-        let (project, dek_version, wrapped): (ProjectId, u32, Vec<u8>) = tx.query_row(
-            "SELECT e.project_id, d.version, d.wrapped
-               FROM environments e
-               JOIN environment_deks d ON d.environment_id = e.id AND d.retired_at IS NULL
-              WHERE e.id = ?1",
-            [env],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
-        let dek = Dek::unwrap(&WrappedDek::from_bytes(wrapped), key)?;
-
-        let key_id = tx
-            .query_row(
-                "SELECT key_id FROM secrets WHERE environment_id = ?1 AND name = ?2",
-                params![env, name.as_str()],
-                |row| row.get(0),
-            )
-            .optional()?
-            .unwrap_or_else(KeyId::new);
-
-        let aad = Aad {
-            format_version: FORMAT_VERSION,
-            vault: self.id,
-            project,
-            environment: env,
-            key: key_id,
-            dek_version,
-            version: 1,
-        };
-        let sealed = dek.encrypt(value, &aad)?;
-
-        tx.execute(
-            "INSERT INTO secrets
-                 (key_id, environment_id, name, format_version, dek_version, version, nonce, ciphertext)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)
-             ON CONFLICT (environment_id, name) DO UPDATE SET
-                 format_version = excluded.format_version,
-                 dek_version    = excluded.dek_version,
-                 nonce          = excluded.nonce,
-                 ciphertext     = excluded.ciphertext,
-                 updated_at     = CURRENT_TIMESTAMP",
-            params![
-                key_id,
-                env,
-                name.as_str(),
-                FORMAT_VERSION,
-                dek_version,
-                &sealed.nonce[..],
-                sealed.ciphertext
-            ],
-        )?;
+        let active = active_dek(&tx, env, key)?;
+        let existing = current(&tx, env, name)?;
+        let outcome = write_value(&tx, self.id, env, name, existing, value, &active)?;
         tx.commit()?;
-        Ok(SetOutcome { key_id, version: 1 })
+        Ok(outcome)
     }
 
     /// Reads and decrypts a secret; `Ok(None)` if no secret has this name.
@@ -339,7 +291,7 @@ impl Vault {
                    JOIN environments e ON e.id = s.environment_id
                    JOIN environment_deks d
                      ON d.environment_id = s.environment_id AND d.version = s.dek_version
-                  WHERE s.environment_id = ?1 AND s.name = ?2",
+                  WHERE s.environment_id = ?1 AND s.name = ?2 AND s.deleted_at IS NULL",
                 params![env, name.as_str()],
                 |row| {
                     Ok(StoredSecret {
@@ -380,7 +332,7 @@ impl Vault {
     pub fn list(&self, env: EnvironmentId) -> Result<Vec<SecretMeta>, VaultError> {
         let mut statement = self.conn.prepare(
             "SELECT name, key_id, version, updated_at
-               FROM secrets WHERE environment_id = ?1 ORDER BY name",
+               FROM secrets WHERE environment_id = ?1 AND deleted_at IS NULL ORDER BY name",
         )?;
         let rows = statement
             .query_map([env], |row| {
@@ -410,11 +362,20 @@ impl Vault {
     /// can bring it back. Returns `true` if a live secret was removed (and the
     /// [`revision`](Vault::revision) incremented), `false` otherwise.
     pub fn remove(&mut self, env: EnvironmentId, name: &VarName) -> Result<bool, VaultError> {
-        let deleted = self.conn.execute(
-            "DELETE FROM secrets WHERE environment_id = ?1 AND name = ?2",
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let removed = tx.execute(
+            "UPDATE secrets SET deleted_at = CURRENT_TIMESTAMP
+              WHERE environment_id = ?1 AND name = ?2 AND deleted_at IS NULL",
             params![env, name.as_str()],
         )?;
-        Ok(deleted > 0)
+        if removed == 0 {
+            return Ok(false);
+        }
+        bump_revision(&tx, env)?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Renames a secret without re-encrypting it: only the label changes,
@@ -431,13 +392,19 @@ impl Vault {
         from: &VarName,
         to: &VarName,
     ) -> Result<(), VaultError> {
-        let renamed = self.conn.execute(
-            "UPDATE secrets SET name = ?3 WHERE environment_id = ?1 AND name = ?2",
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let renamed = tx.execute(
+            "UPDATE secrets SET name = ?3
+              WHERE environment_id = ?1 AND name = ?2 AND deleted_at IS NULL",
             params![env, from.as_str(), to.as_str()],
         )?;
         if renamed == 0 {
             return Err(VaultError::NotFound);
         }
+        bump_revision(&tx, env)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -448,8 +415,13 @@ impl Vault {
     /// # Errors
     /// [`VaultError::NotFound`] for an unknown environment.
     pub fn revision(&self, env: EnvironmentId) -> Result<u64, VaultError> {
-        let _ = env;
-        todo!()
+        let revision: i64 = self.conn.query_row(
+            "SELECT revision FROM environments WHERE id = ?1",
+            [env],
+            |row| row.get(0),
+        )?;
+        u64::try_from(revision)
+            .map_err(|_| VaultError::Storage(rusqlite::Error::IntegralValueOutOfRange(0, revision)))
     }
 
     /// Versions of a secret, newest first: the current one followed by up to
@@ -462,8 +434,29 @@ impl Vault {
         env: EnvironmentId,
         name: &VarName,
     ) -> Result<Vec<VersionMeta>, VaultError> {
-        let _ = (env, name);
-        todo!()
+        let (key_id, version, updated_at): (KeyId, u32, String) = self.conn.query_row(
+            "SELECT key_id, version, updated_at FROM secrets
+              WHERE environment_id = ?1 AND name = ?2 AND deleted_at IS NULL",
+            params![env, name.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let mut statement = self.conn.prepare(
+            "SELECT version, created_at FROM secret_versions
+              WHERE key_id = ?1 ORDER BY version DESC",
+        )?;
+        let previous = statement.query_map([key_id], |row| {
+            Ok(VersionMeta {
+                version: row.get(0)?,
+                created_at: row.get(1)?,
+            })
+        })?;
+        std::iter::once(Ok(VersionMeta {
+            version,
+            created_at: updated_at,
+        }))
+        .chain(previous)
+        .collect::<Result<_, _>>()
+        .map_err(VaultError::from)
     }
 
     /// Restores the previous state of a secret. History only grows:
@@ -486,17 +479,247 @@ impl Vault {
         name: &VarName,
         key: &impl Unwrapper,
     ) -> Result<u32, VaultError> {
-        let _ = (env, name, key);
-        todo!()
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let active = active_dek(&tx, env, key)?;
+        let current = current(&tx, env, name)?.ok_or(VaultError::NotFound)?;
+
+        if current.deleted {
+            tx.execute(
+                "UPDATE secrets SET deleted_at = NULL WHERE key_id = ?1",
+                [current.key_id],
+            )?;
+            bump_revision(&tx, env)?;
+            tx.commit()?;
+            return Ok(current.version);
+        }
+
+        let previous = tx
+            .query_row(
+                "SELECT version, format_version, dek_version, nonce, ciphertext
+                   FROM secret_versions WHERE key_id = ?1
+                  ORDER BY version DESC LIMIT 1",
+                [current.key_id],
+                |row| {
+                    Ok((
+                        row.get::<_, u32>(0)?,
+                        row.get::<_, u32>(1)?,
+                        row.get::<_, u32>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((version, format_version, dek_version, nonce, ciphertext)) = previous else {
+            return Err(VaultError::NothingToUndo);
+        };
+
+        let old_dek;
+        let dek = if dek_version == active.version {
+            &active.dek
+        } else {
+            old_dek = dek_at(&tx, env, dek_version, key)?;
+            &old_dek
+        };
+        let sealed = EncryptedValue {
+            nonce: nonce.try_into().map_err(|_| SecretError::Decrypt)?,
+            ciphertext,
+        };
+        let aad = Aad {
+            format_version,
+            vault: self.id,
+            project: active.project,
+            environment: env,
+            key: current.key_id,
+            dek_version,
+            version,
+        };
+        let restored = dek.decrypt(&sealed, &aad)?;
+
+        let outcome = write_value(&tx, self.id, env, name, Some(current), &restored, &active)?;
+        tx.commit()?;
+        Ok(outcome.version)
     }
 
     /// Deletes a secret permanently, together with its history; works on
     /// removed secrets too. Returns `true` if something was deleted (and the
     /// [`revision`](Vault::revision) incremented).
     pub fn purge(&mut self, env: EnvironmentId, name: &VarName) -> Result<bool, VaultError> {
-        let _ = (env, name);
-        todo!()
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let purged = tx.execute(
+            "DELETE FROM secrets WHERE environment_id = ?1 AND name = ?2",
+            params![env, name.as_str()],
+        )?;
+        if purged == 0 {
+            return Ok(false);
+        }
+        bump_revision(&tx, env)?;
+        tx.commit()?;
+        Ok(true)
     }
+}
+
+/// The active DEK of an environment, unwrapped with the caller's key.
+struct ActiveDek {
+    project: ProjectId,
+    version: u32,
+    dek: Dek,
+}
+
+/// The row of a secret by name, including a soft-deleted one.
+struct Current {
+    key_id: KeyId,
+    version: u32,
+    deleted: bool,
+}
+
+/// Loads and unwraps the active DEK. Fails before any write for a wrong key
+/// ([`KeyError::Unwrap`]) or an unknown environment ([`VaultError::NotFound`]).
+fn active_dek(
+    conn: &Connection,
+    env: EnvironmentId,
+    key: &impl Unwrapper,
+) -> Result<ActiveDek, VaultError> {
+    let (project, version, wrapped): (ProjectId, u32, Vec<u8>) = conn.query_row(
+        "SELECT e.project_id, d.version, d.wrapped
+           FROM environments e
+           JOIN environment_deks d ON d.environment_id = e.id AND d.retired_at IS NULL
+          WHERE e.id = ?1",
+        [env],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let dek = Dek::unwrap(&WrappedDek::from_bytes(wrapped), key)?;
+    Ok(ActiveDek {
+        project,
+        version,
+        dek,
+    })
+}
+
+/// Unwraps a specific (possibly retired) DEK version of an environment.
+fn dek_at(
+    conn: &Connection,
+    env: EnvironmentId,
+    version: u32,
+    key: &impl Unwrapper,
+) -> Result<Dek, VaultError> {
+    let wrapped: Vec<u8> = conn.query_row(
+        "SELECT wrapped FROM environment_deks WHERE environment_id = ?1 AND version = ?2",
+        params![env, version],
+        |row| row.get(0),
+    )?;
+    Ok(Dek::unwrap(&WrappedDek::from_bytes(wrapped), key)?)
+}
+
+fn current(
+    conn: &Connection,
+    env: EnvironmentId,
+    name: &VarName,
+) -> Result<Option<Current>, VaultError> {
+    Ok(conn
+        .query_row(
+            "SELECT key_id, version, deleted_at IS NOT NULL FROM secrets
+              WHERE environment_id = ?1 AND name = ?2",
+            params![env, name.as_str()],
+            |row| {
+                Ok(Current {
+                    key_id: row.get(0)?,
+                    version: row.get(1)?,
+                    deleted: row.get(2)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+fn bump_revision(conn: &Connection, env: EnvironmentId) -> Result<(), VaultError> {
+    conn.execute(
+        "UPDATE environments SET revision = revision + 1 WHERE id = ?1",
+        [env],
+    )?;
+    Ok(())
+}
+
+/// Writes `value` as the next version of a secret (or version 1 of a new one)
+/// with the active DEK: archives the current value, trims the history to
+/// [`HISTORY_LIMIT`], clears a soft delete and increments the revision.
+fn write_value(
+    conn: &Connection,
+    vault: VaultId,
+    env: EnvironmentId,
+    name: &VarName,
+    existing: Option<Current>,
+    value: &SecretValue,
+    active: &ActiveDek,
+) -> Result<SetOutcome, VaultError> {
+    let (key_id, version) = match &existing {
+        Some(current) => (current.key_id, current.version + 1),
+        None => (KeyId::new(), 1),
+    };
+    let aad = Aad {
+        format_version: FORMAT_VERSION,
+        vault,
+        project: active.project,
+        environment: env,
+        key: key_id,
+        dek_version: active.version,
+        version,
+    };
+    let sealed = active.dek.encrypt(value, &aad)?;
+
+    if existing.is_some() {
+        conn.execute(
+            "INSERT INTO secret_versions
+                 (key_id, version, format_version, dek_version, nonce, ciphertext, created_at)
+             SELECT key_id, version, format_version, dek_version, nonce, ciphertext, updated_at
+               FROM secrets WHERE key_id = ?1",
+            [key_id],
+        )?;
+        conn.execute(
+            "DELETE FROM secret_versions
+              WHERE key_id = ?1
+                AND version NOT IN (SELECT version FROM secret_versions WHERE key_id = ?1
+                                     ORDER BY version DESC LIMIT ?2)",
+            params![key_id, HISTORY_LIMIT as i64],
+        )?;
+        conn.execute(
+            "UPDATE secrets SET
+                 format_version = ?2, dek_version = ?3, version = ?4,
+                 nonce = ?5, ciphertext = ?6,
+                 updated_at = CURRENT_TIMESTAMP, deleted_at = NULL
+              WHERE key_id = ?1",
+            params![
+                key_id,
+                FORMAT_VERSION,
+                active.version,
+                version,
+                &sealed.nonce[..],
+                sealed.ciphertext
+            ],
+        )?;
+    } else {
+        conn.execute(
+            "INSERT INTO secrets
+                 (key_id, environment_id, name, format_version, dek_version, version, nonce, ciphertext)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                key_id,
+                env,
+                name.as_str(),
+                FORMAT_VERSION,
+                active.version,
+                version,
+                &sealed.nonce[..],
+                sealed.ciphertext
+            ],
+        )?;
+    }
+    bump_revision(conn, env)?;
+    Ok(SetOutcome { key_id, version })
 }
 
 /// Opens an existing file (never creates one) with foreign keys enforced.

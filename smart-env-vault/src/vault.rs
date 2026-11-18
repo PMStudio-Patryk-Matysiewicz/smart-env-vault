@@ -1192,5 +1192,8 @@ fn connect(path: &Path) -> Result<Connection, VaultError> {
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     conn.pragma_update(None, "foreign_keys", true)?;
+    conn.pragma_update(None, "secure_delete", true)?;
+    conn.pragma_update(None, "trusted_schema", false)?;
+    conn.pragma_update(None, "busy_timeout", 5_000)?;
     Ok(conn)
 }

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 age = "0.12"
+dirs = "6"
 keyring = "4"
 secrecy = "0.10"
 zeroize = "1"

@@ -11,6 +11,7 @@
 //! Entry point: [`Vault`]. The database holds only ciphertext and wrapped keys.
 #![forbid(unsafe_code)]
 
+mod data;
 mod dek;
 mod device;
 mod error;
@@ -20,6 +21,7 @@ mod secret;
 mod store;
 mod vault;
 
+pub use data::{DataPaths, DataPathsError, StateStore};
 pub use dek::{Dek, Unwrapper, WrappedDek};
 pub use device::{DeviceKey, PublicKey};
 pub use error::KeyError;

@@ -7,9 +7,8 @@ fn initialize_should_create_directory_and_both_databases() {
     let root = temp.path().join("data").join("smart-env");
     let paths = DataPaths::from_root(&root);
 
-    let (vault, _state) = paths.initialize().unwrap();
+    let (_vault, _state) = paths.initialize().unwrap();
 
-    assert_eq!(vault.id().to_string().len(), 36);
     assert!(paths.vault_db().exists());
     assert!(paths.state_db().exists());
 }

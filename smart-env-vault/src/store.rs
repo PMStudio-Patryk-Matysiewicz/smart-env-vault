@@ -1,9 +1,11 @@
 use crate::{DeviceKey, KeyError};
 use secrecy::{ExposeSecret, SecretString};
 use std::{
+    fs::OpenOptions,
     path::{Path, PathBuf},
     sync::Mutex,
 };
+use uuid::Uuid;
 
 /// Persistent storage for the [`DeviceKey`].
 ///
@@ -129,7 +131,37 @@ impl PassphraseFileStore {
         std::io::Write::write_all(&mut writer, secret.expose_secret().as_bytes())
             .map_err(|_| KeyError::Storage)?;
         writer.finish().map_err(|_| KeyError::Storage)?;
-        std::fs::write(&self.path, bytes).map_err(|_| KeyError::Storage)
+
+        let temp_path = self
+            .path
+            .with_added_extension(format!("tmp-{}", Uuid::new_v4()));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+
+        let mut temp_file = options.open(&temp_path).map_err(|_| KeyError::Storage)?;
+
+        if let Err(error) =
+            std::io::Write::write_all(&mut temp_file, &bytes).and_then(|_| temp_file.sync_all())
+        {
+            let _ = std::fs::remove_file(&temp_path);
+            let _ = error;
+            return Err(KeyError::Storage);
+        }
+        drop(temp_file);
+
+        #[cfg(windows)]
+        if self.path.exists() {
+            std::fs::remove_file(&self.path).map_err(|_| KeyError::Storage)?;
+        }
+
+        if let Err(error) = std::fs::rename(&temp_path, &self.path) {
+            let _ = std::fs::remove_file(&temp_path);
+            let _ = error;
+            return Err(KeyError::Storage);
+        }
+        Ok(())
     }
 }
 
@@ -212,6 +244,20 @@ mod tests {
         store.delete().unwrap();
 
         assert!(store.load().unwrap().is_none());
+    }
+
+    #[test]
+    fn save_should_replace_an_existing_device_key() {
+        let directory = TempDir::new().unwrap();
+        let store = store_in(&directory, "correct horse battery staple");
+        let first = DeviceKey::generate();
+        let replacement = DeviceKey::generate();
+
+        store.save(&first).unwrap();
+        store.save(&replacement).unwrap();
+        let loaded = store.load().unwrap().unwrap();
+
+        assert_eq!(loaded.public(), replacement.public());
     }
 
     #[cfg(unix)]

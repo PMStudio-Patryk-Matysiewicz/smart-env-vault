@@ -155,3 +155,79 @@ impl KeyStore for PassphraseFileStore {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn store_in(directory: &TempDir, passphrase: &str) -> PassphraseFileStore {
+        PassphraseFileStore::new(
+            directory.path().join("device-key.age"),
+            SecretString::from(passphrase),
+        )
+    }
+
+    #[test]
+    fn save_and_load_should_round_trip_device_key() {
+        let directory = TempDir::new().unwrap();
+        let store = store_in(&directory, "correct horse battery staple");
+        let key = DeviceKey::generate();
+
+        store.save(&key).unwrap();
+        let loaded = store.load().unwrap().unwrap();
+
+        assert_eq!(loaded.public(), key.public());
+    }
+
+    #[test]
+    fn load_should_return_none_before_first_save() {
+        let directory = TempDir::new().unwrap();
+        let store = store_in(&directory, "correct horse battery staple");
+
+        assert!(store.load().unwrap().is_none());
+    }
+
+    #[test]
+    fn load_should_return_wrong_passphrase_for_a_different_passphrase() {
+        let directory = TempDir::new().unwrap();
+        let store = store_in(&directory, "correct horse battery staple");
+        store.save(&DeviceKey::generate()).unwrap();
+
+        let wrong_store = PassphraseFileStore::new(
+            directory.path().join("device-key.age"),
+            SecretString::from("wrong"),
+        );
+
+        assert_eq!(wrong_store.load().unwrap_err(), KeyError::WrongPassphrase);
+    }
+
+    #[test]
+    fn delete_should_remove_key_and_be_idempotent() {
+        let directory = TempDir::new().unwrap();
+        let store = store_in(&directory, "correct horse battery staple");
+        store.save(&DeviceKey::generate()).unwrap();
+
+        store.delete().unwrap();
+        store.delete().unwrap();
+
+        assert!(store.load().unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_should_create_key_file_with_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TempDir::new().unwrap();
+        let store = store_in(&directory, "correct horse battery staple");
+        store.save(&DeviceKey::generate()).unwrap();
+        let mode = std::fs::metadata(directory.path().join("device-key.age"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(mode, 0o600);
+    }
+}

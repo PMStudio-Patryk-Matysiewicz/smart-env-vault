@@ -1,9 +1,10 @@
 use std::ffi::OsString;
 use std::io::Write;
 
+use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::{EnvRef, Exit};
+use crate::{CliError, EnvRef, Exit, Interaction};
 
 /// `smart-env` command line.
 #[derive(Debug, Parser)]
@@ -104,20 +105,109 @@ pub enum Command {
     Lock,
 }
 
+impl Command {
+    /// Name as typed on the command line.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Setup => "setup",
+            Self::Init => "init",
+            Self::Set { .. } => "set",
+            Self::Ls => "ls",
+            Self::Rm { .. } => "rm",
+            Self::Rename { .. } => "rename",
+            Self::History { .. } => "history",
+            Self::Undo { .. } => "undo",
+            Self::Run { .. } => "run",
+            Self::Unlock => "unlock",
+            Self::Lock => "lock",
+        }
+    }
+}
+
 /// Runs the CLI with `args` (program name first) and returns the exit code.
 ///
 /// Normal output goes to `out`. Errors go to `err` as `✗ …`, or to `out` as
 /// JSON with `--json` — also when the arguments themselves are wrong.
 /// `stdin_is_tty` decides interactive mode together with `--yes`.
-pub fn execute<I, T>(
-    _args: I,
-    _stdin_is_tty: bool,
-    _out: &mut dyn Write,
-    _err: &mut dyn Write,
-) -> Exit
+pub fn execute<I, T>(args: I, stdin_is_tty: bool, out: &mut dyn Write, err: &mut dyn Write) -> Exit
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    todo!("F06 11: dispatch and error reporting")
+    let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+    let json = json_requested(&args);
+    let result = match Cli::try_parse_from(&args) {
+        Ok(cli) => {
+            let interaction = Interaction::detect(cli.global.yes, stdin_is_tty);
+            dispatch(&cli, interaction, out)
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) =>
+        {
+            // Output errors (closed pipe) cannot be reported anywhere better.
+            let _ = write!(out, "{}", error.render());
+            Ok(Exit::Success)
+        }
+        Err(error) => Err(usage_error(&error)),
+    };
+    match result {
+        Ok(exit) => exit,
+        Err(error) => {
+            let _ = if json {
+                writeln!(out, "{}", error.render_json())
+            } else {
+                write!(err, "{}", error.render_human())
+            };
+            error.exit()
+        }
+    }
+}
+
+/// `--json` anywhere before `--`, so it also applies when parsing fails.
+fn json_requested(args: &[OsString]) -> bool {
+    args.iter()
+        .skip(1)
+        .take_while(|arg| *arg != "--")
+        .any(|arg| arg == "--json")
+}
+
+/// Commands get their behaviour in later checklist items.
+fn dispatch(cli: &Cli, _interaction: Interaction, _out: &mut dyn Write) -> Result<Exit, CliError> {
+    Err(CliError::new(
+        "not_implemented",
+        Exit::Failure,
+        format!("Komenda {} nie jest jeszcze dostępna.", cli.command.name()),
+    )
+    .with_hint("Dostępne komendy: smart-env --help"))
+}
+
+/// Describes a parse error without repeating what the user typed: an
+/// unexpected argument may be a pasted secret. Only names of our own
+/// arguments are quoted.
+fn usage_error(error: &clap::Error) -> CliError {
+    let own_arg = || match error.get(ContextKind::InvalidArg) {
+        Some(ContextValue::String(arg)) => format!(": {arg}"),
+        Some(ContextValue::Strings(args)) => format!(": {}", args.join(", ")),
+        _ => String::new(),
+    };
+    let message = match error.kind() {
+        ErrorKind::InvalidSubcommand => "Nieznana komenda.".to_owned(),
+        ErrorKind::UnknownArgument => "Nieoczekiwany argument.".to_owned(),
+        ErrorKind::MissingSubcommand | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+            "Brak komendy.".to_owned()
+        }
+        ErrorKind::MissingRequiredArgument => format!("Brak wymaganego argumentu{}", own_arg()),
+        ErrorKind::InvalidValue | ErrorKind::ValueValidation => {
+            format!("Nieprawidłowa wartość{}", own_arg())
+        }
+        ErrorKind::ArgumentConflict => format!("Wykluczające się argumenty{}", own_arg()),
+        ErrorKind::TooManyValues | ErrorKind::WrongNumberOfValues => {
+            format!("Zła liczba wartości{}", own_arg())
+        }
+        _ => "Błędne użycie.".to_owned(),
+    };
+    CliError::usage(message)
 }

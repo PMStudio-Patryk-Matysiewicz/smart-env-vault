@@ -17,13 +17,21 @@ pub enum Interaction {
 
 impl Interaction {
     /// Picks the mode from `--yes` and whether stdin is a terminal.
-    pub fn detect(_yes: bool, _stdin_is_tty: bool) -> Self {
-        todo!("F06 11: interaction mode")
+    pub fn detect(yes: bool, stdin_is_tty: bool) -> Self {
+        match (yes, stdin_is_tty) {
+            (true, _) => Self::AssumeYes,
+            (false, true) => Self::Interactive,
+            (false, false) => Self::NonInteractive,
+        }
     }
 
     /// Confirms `action`. `ask` shows the question and is called only in
     /// [`Interaction::Interactive`] mode.
-    pub fn confirm(self, _action: &str, _ask: impl FnOnce() -> bool) -> Result<bool, CliError> {
-        todo!("F06 11: confirmation")
+    pub fn confirm(self, action: &str, ask: impl FnOnce() -> bool) -> Result<bool, CliError> {
+        match self {
+            Self::Interactive => Ok(ask()),
+            Self::AssumeYes => Ok(true),
+            Self::NonInteractive => Err(CliError::confirmation_required(action)),
+        }
     }
 }

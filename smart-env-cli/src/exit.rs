@@ -21,6 +21,13 @@ pub enum Exit {
 impl Exit {
     /// Numeric process exit code.
     pub fn code(self) -> u8 {
-        todo!("F06 11: exit code mapping")
+        match self {
+            Self::Success => 0,
+            Self::Failure => 1,
+            Self::Usage => 2,
+            Self::Access => 3,
+            Self::NotFound => 4,
+            Self::Conflict => 5,
+        }
     }
 }

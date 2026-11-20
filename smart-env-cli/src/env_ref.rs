@@ -28,7 +28,22 @@ impl std::error::Error for EnvRefError {}
 impl FromStr for EnvRef {
     type Err = EnvRefError;
 
-    fn from_str(_input: &str) -> Result<Self, Self::Err> {
-        todo!("F06 11: --env parsing")
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let valid = |part: &str| !part.is_empty() && !part.contains(char::is_whitespace);
+        match input.split_once('/') {
+            None if valid(input) => Ok(Self {
+                project: None,
+                environment: input.to_owned(),
+            }),
+            Some((project, environment))
+                if valid(project) && valid(environment) && !environment.contains('/') =>
+            {
+                Ok(Self {
+                    project: Some(project.to_owned()),
+                    environment: environment.to_owned(),
+                })
+            }
+            _ => Err(EnvRefError),
+        }
     }
 }

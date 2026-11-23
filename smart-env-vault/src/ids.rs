@@ -39,17 +39,21 @@ macro_rules! id_type {
 
         /// Hyphenated lowercase UUID, e.g. `0b9e6d3c-5f1a-4c8e-9d2b-7a6e1f3c8b40`.
         impl fmt::Display for $name {
-            fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                todo!()
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                fmt::Display::fmt(&self.0.hyphenated(), f)
             }
         }
 
-        /// Parses the text form produced by `Display`.
+        /// Parses the text form produced by `Display` (hyphenated, any case);
+        /// other UUID spellings (braced, URN, without hyphens) are rejected.
         impl FromStr for $name {
             type Err = IdParseError;
 
-            fn from_str(_text: &str) -> Result<Self, Self::Err> {
-                todo!()
+            fn from_str(text: &str) -> Result<Self, Self::Err> {
+                if text.len() != uuid::fmt::Hyphenated::LENGTH {
+                    return Err(IdParseError);
+                }
+                uuid::Uuid::try_parse(text).map(Self).map_err(|_| IdParseError)
             }
         }
 

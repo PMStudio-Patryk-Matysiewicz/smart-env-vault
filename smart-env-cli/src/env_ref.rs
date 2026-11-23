@@ -26,9 +26,10 @@ impl fmt::Display for EnvRefError {
 impl std::error::Error for EnvRefError {}
 
 /// Shape of one part of `[project/]environment`: not empty, no whitespace,
+/// no control characters (terminal escapes from a hostile `smart-env.toml`),
 /// no `/`. Shared with `smart-env.toml`.
 pub(crate) fn is_valid_part(part: &str) -> bool {
-    !part.is_empty() && !part.contains(char::is_whitespace) && !part.contains('/')
+    !part.is_empty() && !part.contains(|c: char| c.is_whitespace() || c.is_control() || c == '/')
 }
 
 impl FromStr for EnvRef {

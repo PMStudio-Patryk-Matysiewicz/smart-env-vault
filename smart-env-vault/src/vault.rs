@@ -335,13 +335,27 @@ impl Vault {
     ///
     /// # Errors
     /// [`VaultError::ProjectNotFound`] if no project has this id.
-    pub fn project_name(&self, _id: ProjectId) -> Result<String, VaultError> {
-        todo!()
+    pub fn project_name(&self, id: ProjectId) -> Result<String, VaultError> {
+        self.conn
+            .query_row(
+                "SELECT name FROM projects WHERE id = ?1 AND vault_id = ?2",
+                params![id, self.id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(VaultError::ProjectNotFound)
     }
 
     /// Id of the project with this name, `None` if there is none.
-    pub fn find_project(&self, _name: &str) -> Result<Option<ProjectId>, VaultError> {
-        todo!()
+    pub fn find_project(&self, name: &str) -> Result<Option<ProjectId>, VaultError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM projects WHERE name = ?1 AND vault_id = ?2",
+                params![name, self.id],
+                |row| row.get(0),
+            )
+            .optional()?)
     }
 
     /// Adds a recipient and wraps every existing DEK version of every

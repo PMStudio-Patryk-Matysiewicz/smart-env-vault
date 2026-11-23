@@ -449,3 +449,18 @@ fn resolve_unknown_id_and_name_is_not_found() {
     assert_eq!(error.exit(), Exit::NotFound);
     assert!(error.hint().unwrap().contains("smart-env init"));
 }
+
+#[test]
+fn parse_rejects_control_characters_in_names() {
+    // A hostile repository must not inject terminal escapes into messages.
+    let text = minimal().replace("\"payments\"", "\"pay\\u001b[31mments\"");
+
+    assert_eq!(parse_err(&text), ProjectFileError::InvalidValue("project"));
+}
+
+#[test]
+fn unknown_key_error_escapes_control_characters() {
+    let error = CliError::from(ProjectFileError::UnknownKey("A\u{1b}[2J".to_owned()));
+
+    assert!(!error.render_human().contains('\u{1b}'));
+}

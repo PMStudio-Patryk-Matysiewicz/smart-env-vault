@@ -1,8 +1,9 @@
 use rusqlite::{Connection, params};
 use smart_env_vault::{
-    AccountId, Dek, DeviceKey, EnvKind, EnvironmentId, HISTORY_LIMIT, Inject, KeyError, Member,
-    ProjectId, PublicKey, Recipient, RecipientId, RecipientKind, RecoveryKey, Role, SecretError,
-    SecretValue, SetOutcome, Unwrapper, VarName, Vault, VaultError, WrappedDek,
+    AccountId, Dek, DeviceKey, EnvKind, EnvironmentId, EnvironmentInfo, HISTORY_LIMIT, Inject,
+    KeyError, Member, NewEnvironment, ProjectId, PublicKey, Recipient, RecipientId, RecipientKind,
+    RecoveryKey, Role, SecretError, SecretMeta, SecretValue, SetOutcome, Unwrapper, VarName, Vault,
+    VaultError, WrappedDek,
 };
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -1390,4 +1391,257 @@ fn add_device_with_foreign_key_changes_nothing() {
     assert!(matches!(err(result), VaultError::Key(KeyError::Unwrap)));
     assert_eq!(recipient_rows(&f.path), recipients);
     assert_eq!(wrap_rows(&f.path), wraps);
+}
+
+// --- import_project (init) ---
+
+fn plain(secrets: Vec<(SecretMeta, SecretValue)>) -> Vec<(String, String)> {
+    secrets
+        .into_iter()
+        .map(|(meta, value)| (meta.name.to_string(), value.expose().to_owned()))
+        .collect()
+}
+
+fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+    list.iter()
+        .map(|(n, v)| ((*n).to_owned(), (*v).to_owned()))
+        .collect()
+}
+
+#[test]
+fn import_project_creates_project_environments_and_values() {
+    let mut f = setup();
+    let dev = entries(&[("B", "2"), ("A", "1")]);
+    let prod = entries(&[("A", "prod-1")]);
+    let (project, envs) = f
+        .vault
+        .import_project(
+            "shop",
+            &[
+                NewEnvironment {
+                    name: "dev",
+                    kind: EnvKind::Dev,
+                    entries: &dev,
+                },
+                NewEnvironment {
+                    name: "prod",
+                    kind: EnvKind::Prod,
+                    entries: &prod,
+                },
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(f.vault.find_project("shop").unwrap(), Some(project));
+    assert_eq!(envs.len(), 2);
+    assert_eq!(
+        plain(f.vault.read_all(envs[0], &f.device).unwrap()),
+        pairs(&[("A", "1"), ("B", "2")])
+    );
+    assert_eq!(
+        plain(f.vault.read_all(envs[1], &f.recovery).unwrap()),
+        pairs(&[("A", "prod-1")])
+    );
+    assert_eq!(f.vault.revision(envs[0]).unwrap(), 1);
+    assert_eq!(f.vault.history(envs[0], &name("A")).unwrap().len(), 1);
+}
+
+#[test]
+fn import_project_wraps_every_environment_for_all_active_recipients() {
+    let mut f = setup();
+    let dev = entries(&[("A", "1")]);
+    let (_, envs) = f
+        .vault
+        .import_project(
+            "shop",
+            &[NewEnvironment {
+                name: "dev",
+                kind: EnvKind::Dev,
+                entries: &dev,
+            }],
+        )
+        .unwrap();
+    let recipients: std::collections::HashSet<RecipientId> = f
+        .vault
+        .environment_recipients(envs[0])
+        .unwrap()
+        .into_iter()
+        .map(|recipient| recipient.id)
+        .collect();
+    assert_eq!(recipients, [f.device_id, f.recovery_id].into());
+}
+
+#[test]
+fn import_project_allows_empty_environments() {
+    let mut f = setup();
+    let (_, envs) = f
+        .vault
+        .import_project(
+            "shop",
+            &[NewEnvironment {
+                name: "dev",
+                kind: EnvKind::Dev,
+                entries: &[],
+            }],
+        )
+        .unwrap();
+    assert!(f.vault.read_all(envs[0], &f.device).unwrap().is_empty());
+    assert_eq!(f.vault.revision(envs[0]).unwrap(), 0);
+}
+
+#[test]
+fn environments_lists_names_and_kinds_sorted_by_name() {
+    let mut f = setup();
+    let (project, envs) = f
+        .vault
+        .import_project(
+            "shop",
+            &[
+                NewEnvironment {
+                    name: "prod",
+                    kind: EnvKind::Prod,
+                    entries: &[],
+                },
+                NewEnvironment {
+                    name: "dev",
+                    kind: EnvKind::Dev,
+                    entries: &[],
+                },
+                NewEnvironment {
+                    name: "qa",
+                    kind: EnvKind::Custom,
+                    entries: &[],
+                },
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        f.vault.environments(project).unwrap(),
+        vec![
+            EnvironmentInfo {
+                id: envs[1],
+                name: "dev".into(),
+                kind: EnvKind::Dev
+            },
+            EnvironmentInfo {
+                id: envs[0],
+                name: "prod".into(),
+                kind: EnvKind::Prod
+            },
+            EnvironmentInfo {
+                id: envs[2],
+                name: "qa".into(),
+                kind: EnvKind::Custom
+            },
+        ]
+    );
+}
+
+#[test]
+fn environments_of_unknown_project_is_not_found() {
+    let f = setup();
+    assert!(matches!(
+        err(f.vault.environments(ProjectId::new())),
+        VaultError::ProjectNotFound
+    ));
+}
+
+#[test]
+fn environments_lists_existing_project() {
+    let f = setup();
+    assert_eq!(
+        f.vault.environments(f.project).unwrap(),
+        vec![EnvironmentInfo {
+            id: f.env,
+            name: "dev".into(),
+            kind: EnvKind::Dev
+        }]
+    );
+}
+
+#[test]
+fn import_project_with_taken_name_writes_nothing() {
+    let mut f = setup();
+    let dev = entries(&[("A", "1")]);
+    assert!(matches!(
+        err(f.vault.import_project(
+            "payments",
+            &[NewEnvironment {
+                name: "staging",
+                kind: EnvKind::Staging,
+                entries: &dev
+            }],
+        )),
+        VaultError::ProjectNameTaken
+    ));
+    assert_eq!(f.vault.environments(f.project).unwrap().len(), 1);
+}
+
+#[test]
+fn import_project_with_repeated_environment_writes_nothing() {
+    let mut f = setup();
+    let dev = entries(&[("A", "1")]);
+    assert!(matches!(
+        err(f.vault.import_project(
+            "shop",
+            &[
+                NewEnvironment {
+                    name: "dev",
+                    kind: EnvKind::Dev,
+                    entries: &dev
+                },
+                NewEnvironment {
+                    name: "dev",
+                    kind: EnvKind::Dev,
+                    entries: &[]
+                },
+            ],
+        )),
+        VaultError::EnvironmentNameTaken
+    ));
+    assert_eq!(f.vault.find_project("shop").unwrap(), None);
+}
+
+#[test]
+fn import_project_with_repeated_variable_writes_nothing() {
+    let mut f = setup();
+    let ok = entries(&[("A", "1")]);
+    let repeated = entries(&[("A", "1"), ("A", "2")]);
+    assert!(matches!(
+        err(f.vault.import_project(
+            "shop",
+            &[
+                NewEnvironment {
+                    name: "dev",
+                    kind: EnvKind::Dev,
+                    entries: &ok
+                },
+                NewEnvironment {
+                    name: "prod",
+                    kind: EnvKind::Prod,
+                    entries: &repeated
+                },
+            ],
+        )),
+        VaultError::DuplicateName(ref duplicate) if duplicate == &name("A")
+    ));
+    assert_eq!(f.vault.find_project("shop").unwrap(), None);
+}
+
+#[test]
+fn import_project_without_recipients_writes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let mut vault = Vault::create(&dir.path().join("vault.db")).unwrap();
+    assert!(matches!(
+        err(vault.import_project(
+            "shop",
+            &[NewEnvironment {
+                name: "dev",
+                kind: EnvKind::Dev,
+                entries: &[]
+            }],
+        )),
+        VaultError::NoRecipients
+    ));
+    assert_eq!(vault.find_project("shop").unwrap(), None);
 }

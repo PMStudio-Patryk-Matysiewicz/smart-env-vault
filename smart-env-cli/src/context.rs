@@ -4,6 +4,7 @@
 //! directories and fakes.
 
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use secrecy::SecretString;
@@ -46,6 +47,9 @@ pub struct Context<'a> {
     pub account_label: String,
     /// Label of this device (host name).
     pub device_label: String,
+    /// Working directory of the command (project commands start here);
+    /// `None` if the system cannot tell.
+    pub current_dir: Option<PathBuf>,
     /// The user's terminal; `None` without one (pipe, CI, installer).
     pub terminal: Option<&'a mut dyn Terminal>,
 }
@@ -57,6 +61,7 @@ pub struct System {
     session: KernelKeyringStore,
     account_label: String,
     device_label: String,
+    current_dir: Option<PathBuf>,
     terminal: Option<StdTerminal>,
 }
 
@@ -75,6 +80,7 @@ impl System {
             session: KernelKeyringStore::new(UNLOCK_TTL),
             account_label: user,
             device_label: whoami::hostname().unwrap_or_default(),
+            current_dir: std::env::current_dir().ok(),
             terminal: (io::stdin().is_terminal() && io::stderr().is_terminal())
                 .then_some(StdTerminal),
         }
@@ -88,6 +94,7 @@ impl System {
             session: &self.session,
             account_label: self.account_label.clone(),
             device_label: self.device_label.clone(),
+            current_dir: self.current_dir.clone(),
             terminal: self
                 .terminal
                 .as_mut()

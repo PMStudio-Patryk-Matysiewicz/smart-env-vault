@@ -135,6 +135,27 @@ impl EnvKind {
     }
 }
 
+/// An environment to create with [`Vault::import_project`].
+pub struct NewEnvironment<'a> {
+    /// Environment name, unique in the project.
+    pub name: &'a str,
+    /// Classification (F03).
+    pub kind: EnvKind,
+    /// Variables to store (version 1); names must be unique.
+    pub entries: &'a [(VarName, SecretValue)],
+}
+
+/// An environment of a project, as listed by [`Vault::environments`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnvironmentInfo {
+    /// Stable id.
+    pub id: EnvironmentId,
+    /// Current name.
+    pub name: String,
+    /// Classification (F03).
+    pub kind: EnvKind,
+}
+
 /// Who a [`Recipient`] is. Stored as data (ADR-001).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecipientKind {
@@ -388,6 +409,32 @@ impl Vault {
             )
             .map_err(|error| unique_as(error, VaultError::ProjectNameTaken))?;
         Ok(id)
+    }
+
+    /// Creates a project with its environments and their variables in one
+    /// transaction (`init`): every environment gets its own DEK wrapped for
+    /// all active recipients; non-empty environments end at revision 1.
+    /// Returns the project id and the environment ids in input order.
+    ///
+    /// # Errors
+    /// [`VaultError::ProjectNameTaken`], [`VaultError::EnvironmentNameTaken`]
+    /// (a name repeated in `environments`), [`VaultError::DuplicateName`] (a
+    /// variable repeated in one environment), [`VaultError::NoRecipients`].
+    /// Nothing is written on error.
+    pub fn import_project(
+        &mut self,
+        _name: &str,
+        _environments: &[NewEnvironment<'_>],
+    ) -> Result<(ProjectId, Vec<EnvironmentId>), VaultError> {
+        todo!()
+    }
+
+    /// Environments of a project, sorted by name.
+    ///
+    /// # Errors
+    /// [`VaultError::ProjectNotFound`] for an unknown project.
+    pub fn environments(&self, _project: ProjectId) -> Result<Vec<EnvironmentInfo>, VaultError> {
+        todo!()
     }
 
     /// Current name of a project (the name may change, the id does not).

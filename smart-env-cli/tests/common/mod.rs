@@ -6,7 +6,8 @@ use secrecy::SecretString;
 use smart_env_cli::{Context, Exit, Terminal, execute};
 use smart_env_vault::{DataPaths, DeviceKey, KeyError, KeyStore, MemoryStore, Vault};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use tempfile::TempDir;
 
 // --- terminal ---
@@ -130,6 +131,8 @@ impl KeyStore for FailingSaveStore {
 pub struct Machine {
     _dir: TempDir,
     pub data: PathBuf,
+    /// Working directory of commands: an empty project directory `payments`.
+    pub project: PathBuf,
     pub keys: Box<dyn KeyStore>,
     pub session: Box<dyn KeyStore>,
     pub account_label: String,
@@ -161,9 +164,12 @@ impl Machine {
     pub fn with_stores(keys: impl KeyStore + 'static, session: impl KeyStore + 'static) -> Self {
         let dir = TempDir::new().unwrap();
         let data = dir.path().join("smart-env");
+        let project = dir.path().join("payments");
+        std::fs::create_dir(&project).unwrap();
         Self {
             _dir: dir,
             data,
+            project,
             keys: Box::new(keys),
             session: Box::new(session),
             account_label: "trawers".to_owned(),
@@ -178,6 +184,7 @@ impl Machine {
             session: self.session.as_ref(),
             account_label: self.account_label.clone(),
             device_label: self.device_label.clone(),
+            current_dir: Some(self.project.clone()),
             terminal,
         }
     }
@@ -207,6 +214,33 @@ impl Machine {
         let run = self.run(&["setup"], Some(&mut terminal));
         let key = shown_key(&terminal.transcript);
         (run, key)
+    }
+
+    /// Switches the working directory to a new empty directory `name`
+    /// next to the data directory.
+    pub fn use_project_dir(&mut self, name: &str) {
+        self.project = self.data.parent().unwrap().join(name);
+        std::fs::create_dir_all(&self.project).unwrap();
+    }
+
+    /// Writes a file in the project directory.
+    pub fn write(&self, name: &str, content: &str) {
+        std::fs::write(self.project.join(name), content).unwrap();
+    }
+
+    /// Reads a file of the project directory; `None` if it does not exist.
+    pub fn read(&self, name: &str) -> Option<String> {
+        std::fs::read_to_string(self.project.join(name)).ok()
+    }
+
+    pub fn exists(&self, name: &str) -> bool {
+        self.project.join(name).exists()
+    }
+
+    /// Runs git in the project directory with a fixed identity; panics on
+    /// failure.
+    pub fn git(&self, args: &[&str]) -> String {
+        git(&self.project, args)
     }
 
     pub fn vault_db(&self) -> PathBuf {
@@ -263,4 +297,29 @@ pub fn error_code(run: &Run) -> String {
         .as_str()
         .unwrap()
         .to_owned()
+}
+
+/// Runs git in `dir` with a fixed identity and no user/system config;
+/// panics on failure.
+pub fn git(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+        .args([
+            "-c",
+            "init.defaultBranch=main",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .expect("git is installed");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
 }

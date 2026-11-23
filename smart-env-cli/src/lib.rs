@@ -11,10 +11,12 @@ mod dotenv;
 mod env_ref;
 mod error;
 mod exit;
+mod init;
 mod interaction;
 mod keys;
 mod lock;
 mod project_file;
+mod reserved;
 mod setup;
 
 pub use cli::{Cli, Command, GlobalArgs, InjectArg, execute};

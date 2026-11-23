@@ -6,13 +6,16 @@
 #![forbid(unsafe_code)]
 
 mod cli;
+mod context;
 mod env_ref;
 mod error;
 mod exit;
 mod interaction;
 mod project_file;
+mod setup;
 
 pub use cli::{Cli, Command, GlobalArgs, InjectArg, execute};
+pub use context::{Context, System, Terminal};
 pub use env_ref::{EnvRef, EnvRefError};
 pub use error::CliError;
 pub use exit::Exit;

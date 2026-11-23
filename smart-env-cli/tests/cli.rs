@@ -2,7 +2,8 @@
 //! through the real binary.
 use std::process::Command;
 
-use smart_env_cli::{Cli, Command as Cmd, Exit, execute};
+use smart_env_cli::{Cli, Command as Cmd, Context, Exit, execute};
+use smart_env_vault::{DataPaths, MemoryStore};
 
 struct Output {
     exit: Exit,
@@ -14,7 +15,16 @@ fn smart_env(args: &[&str]) -> Output {
     let mut out = Vec::new();
     let mut err = Vec::new();
     let argv = std::iter::once("smart-env").chain(args.iter().copied());
-    let exit = execute(argv, false, &mut out, &mut err);
+    let dir = tempfile::TempDir::new().unwrap();
+    let keys = MemoryStore::default();
+    let mut ctx = Context {
+        data: Some(DataPaths::from_root(dir.path().join("smart-env"))),
+        keys: &keys,
+        account_label: "trawers".to_owned(),
+        device_label: "laptop".to_owned(),
+        terminal: None,
+    };
+    let exit = execute(argv, &mut ctx, &mut out, &mut err);
     Output {
         exit,
         stdout: String::from_utf8(out).unwrap(),

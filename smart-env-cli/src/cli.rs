@@ -4,7 +4,7 @@ use std::io::Write;
 use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::{CliError, EnvRef, Exit, Interaction};
+use crate::{CliError, Context, EnvRef, Exit, Interaction, setup};
 
 /// `smart-env` command line.
 #[derive(Debug, Parser)]
@@ -128,8 +128,14 @@ impl Command {
 ///
 /// Normal output goes to `out`. Errors go to `err` as `✗ …`, or to `out` as
 /// JSON with `--json` — also when the arguments themselves are wrong.
-/// `stdin_is_tty` decides interactive mode together with `--yes`.
-pub fn execute<I, T>(args: I, stdin_is_tty: bool, out: &mut dyn Write, err: &mut dyn Write) -> Exit
+/// Whether there is a terminal in `ctx` decides interactive mode together
+/// with `--yes`.
+pub fn execute<I, T>(
+    args: I,
+    ctx: &mut Context<'_>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Exit
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
@@ -138,8 +144,8 @@ where
     let json = json_requested(&args);
     let result = match Cli::try_parse_from(&args) {
         Ok(cli) => {
-            let interaction = Interaction::detect(cli.global.yes, stdin_is_tty);
-            dispatch(&cli, interaction, out)
+            let interaction = Interaction::detect(cli.global.yes, ctx.terminal.is_some());
+            dispatch(&cli, ctx, interaction, json, out)
         }
         Err(error)
             if matches!(
@@ -174,14 +180,23 @@ fn json_requested(args: &[OsString]) -> bool {
         .any(|arg| arg == "--json")
 }
 
-/// Commands get their behaviour in later checklist items.
-fn dispatch(cli: &Cli, _interaction: Interaction, _out: &mut dyn Write) -> Result<Exit, CliError> {
-    Err(CliError::new(
-        "not_implemented",
-        Exit::Failure,
-        format!("Komenda {} nie jest jeszcze dostępna.", cli.command.name()),
-    )
-    .with_hint("Dostępne komendy: smart-env --help"))
+/// Commands without behaviour yet report `not_implemented`.
+fn dispatch(
+    cli: &Cli,
+    ctx: &mut Context<'_>,
+    interaction: Interaction,
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<Exit, CliError> {
+    match cli.command {
+        Command::Setup => setup::run(ctx, interaction, json, out),
+        _ => Err(CliError::new(
+            "not_implemented",
+            Exit::Failure,
+            format!("Komenda {} nie jest jeszcze dostępna.", cli.command.name()),
+        )
+        .with_hint("Dostępne komendy: smart-env --help")),
+    }
 }
 
 /// Describes a parse error without repeating what the user typed: an

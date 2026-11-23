@@ -7,6 +7,7 @@
 
 mod cli;
 mod context;
+mod dotenv;
 mod env_ref;
 mod error;
 mod exit;
@@ -18,6 +19,7 @@ mod setup;
 
 pub use cli::{Cli, Command, GlobalArgs, InjectArg, execute};
 pub use context::{Context, System, Terminal, UNLOCK_TTL};
+pub use dotenv::{Dotenv, DotenvEntry, DotenvError, DotenvWarning};
 pub use env_ref::{EnvRef, EnvRefError};
 pub use error::CliError;
 pub use exit::Exit;

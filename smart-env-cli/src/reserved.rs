@@ -4,11 +4,52 @@
 
 /// Whether `name` is reserved: an exact name from the ADR-005 list or a
 /// reserved prefix (`DYLD_`, `GIT_`, `SMART_ENV_`), ignoring case.
-// Used by `init` from the green phase on.
-#[allow(dead_code)]
-pub(crate) fn is_reserved(_name: &str) -> bool {
-    todo!()
+pub(crate) fn is_reserved(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    EXACT.contains(&name.as_str()) || PREFIXES.iter().any(|prefix| name.starts_with(prefix))
 }
+
+/// Exact names from ADR-005, upper case.
+const EXACT: &[&str] = &[
+    // loading code
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    // shell and paths
+    "PATH",
+    "BASH_ENV",
+    "ENV",
+    "ZDOTDIR",
+    "PROMPT_COMMAND",
+    "SHELLOPTS",
+    "IFS",
+    "HOME",
+    // interpreter options
+    "NODE_OPTIONS",
+    "PYTHONSTARTUP",
+    "PYTHONPATH",
+    "PERL5OPT",
+    "RUBYOPT",
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    // tools
+    "EDITOR",
+    "VISUAL",
+    "PAGER",
+    "SSH_AUTH_SOCK",
+    // network and certificates
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+    "REQUESTS_CA_BUNDLE",
+];
+
+/// Reserved prefixes from ADR-005, upper case.
+const PREFIXES: &[&str] = &["DYLD_", "GIT_", "SMART_ENV_"];
 
 #[cfg(test)]
 mod tests {

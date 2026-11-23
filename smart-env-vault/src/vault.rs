@@ -125,6 +125,15 @@ pub enum EnvKind {
 }
 
 impl EnvKind {
+    fn from_db(kind: &str) -> Self {
+        match kind {
+            "dev" => Self::Dev,
+            "staging" => Self::Staging,
+            "prod" => Self::Prod,
+            _ => Self::Custom,
+        }
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             Self::Dev => "dev",
@@ -423,18 +432,96 @@ impl Vault {
     /// Nothing is written on error.
     pub fn import_project(
         &mut self,
-        _name: &str,
-        _environments: &[NewEnvironment<'_>],
+        name: &str,
+        environments: &[NewEnvironment<'_>],
     ) -> Result<(ProjectId, Vec<EnvironmentId>), VaultError> {
-        todo!()
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let active = {
+            let mut statement = tx.prepare(
+                "SELECT id, public_key FROM recipients
+                  WHERE vault_id = ?1 AND revoked_at IS NULL ORDER BY rowid",
+            )?;
+            statement
+                .query_map([self.id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<(RecipientId, PublicKey)>, _>>()?
+        };
+        if active.is_empty() {
+            return Err(VaultError::NoRecipients);
+        }
+
+        let project = ProjectId::new();
+        tx.execute(
+            "INSERT INTO projects (id, vault_id, name) VALUES (?1, ?2, ?3)",
+            params![project, self.id, name],
+        )
+        .map_err(|error| unique_as(error, VaultError::ProjectNameTaken))?;
+
+        let mut ids = Vec::with_capacity(environments.len());
+        for environment in environments {
+            let id = EnvironmentId::new();
+            tx.execute(
+                "INSERT INTO environments (id, project_id, name, kind) VALUES (?1, ?2, ?3, ?4)",
+                params![id, project, environment.name, environment.kind.as_str()],
+            )
+            .map_err(|error| unique_as(error, VaultError::EnvironmentNameTaken))?;
+            tx.execute(
+                "INSERT INTO environment_deks (environment_id, version) VALUES (?1, 1)",
+                [id],
+            )?;
+            let dek = Dek::generate()?;
+            for (recipient, public_key) in &active {
+                store_wrap(&tx, id, 1, &dek, *recipient, public_key)?;
+            }
+
+            let dek = ActiveDek {
+                project,
+                version: 1,
+                dek,
+            };
+            let mut seen = HashSet::new();
+            for (name, value) in environment.entries {
+                if !seen.insert(name) {
+                    return Err(VaultError::DuplicateName(name.clone()));
+                }
+                write_value(&tx, self.id, id, name, None, value, &dek)?;
+            }
+            if !environment.entries.is_empty() {
+                bump_revision(&tx, id)?;
+            }
+            ids.push(id);
+        }
+        tx.commit()?;
+        Ok((project, ids))
     }
 
     /// Environments of a project, sorted by name.
     ///
     /// # Errors
     /// [`VaultError::ProjectNotFound`] for an unknown project.
-    pub fn environments(&self, _project: ProjectId) -> Result<Vec<EnvironmentInfo>, VaultError> {
-        todo!()
+    pub fn environments(&self, project: ProjectId) -> Result<Vec<EnvironmentInfo>, VaultError> {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM projects WHERE id = ?1 AND vault_id = ?2",
+                params![project, self.id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .ok_or(VaultError::ProjectNotFound)?;
+        let mut statement = self.conn.prepare(
+            "SELECT id, name, kind FROM environments WHERE project_id = ?1 ORDER BY name",
+        )?;
+        let environments = statement
+            .query_map([project], |row| {
+                Ok(EnvironmentInfo {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    kind: EnvKind::from_db(&row.get::<_, String>(2)?),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(environments)
     }
 
     /// Current name of a project (the name may change, the id does not).

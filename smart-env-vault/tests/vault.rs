@@ -1139,6 +1139,35 @@ fn import_with_wrong_key_changes_nothing() {
 // --- C6: specific errors ---------------------------------------------------------
 
 #[test]
+fn project_name_returns_current_name() {
+    let f = setup();
+    assert_eq!(f.vault.project_name(f.project).unwrap(), "payments");
+}
+
+#[test]
+fn project_name_of_unknown_id_is_not_found() {
+    let f = setup();
+    assert!(matches!(
+        err(f.vault.project_name(ProjectId::new())),
+        VaultError::ProjectNotFound
+    ));
+}
+
+#[test]
+fn find_project_by_name() {
+    let mut f = setup();
+    let other = f.vault.create_project("billing").unwrap();
+    assert_eq!(f.vault.find_project("payments").unwrap(), Some(f.project));
+    assert_eq!(f.vault.find_project("billing").unwrap(), Some(other));
+}
+
+#[test]
+fn find_project_of_unknown_name_is_none() {
+    let f = setup();
+    assert_eq!(f.vault.find_project("billing").unwrap(), None);
+}
+
+#[test]
 fn duplicate_project_name_is_taken() {
     let mut f = setup();
     assert!(matches!(

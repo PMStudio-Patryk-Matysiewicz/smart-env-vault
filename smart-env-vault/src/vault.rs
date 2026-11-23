@@ -331,6 +331,19 @@ impl Vault {
         Ok(id)
     }
 
+    /// Current name of a project (the name may change, the id does not).
+    ///
+    /// # Errors
+    /// [`VaultError::ProjectNotFound`] if no project has this id.
+    pub fn project_name(&self, _id: ProjectId) -> Result<String, VaultError> {
+        todo!()
+    }
+
+    /// Id of the project with this name, `None` if there is none.
+    pub fn find_project(&self, _name: &str) -> Result<Option<ProjectId>, VaultError> {
+        todo!()
+    }
+
     /// Adds a recipient and wraps every existing DEK version of every
     /// environment for it, in one transaction (retired versions too, so
     /// values not yet re-encrypted by a rotation stay readable).

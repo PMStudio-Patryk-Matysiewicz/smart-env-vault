@@ -1,4 +1,12 @@
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
+use std::fmt;
+use std::str::FromStr;
+
+/// Text is not a UUID (e.g. `project_id` in `smart-env.toml`). Never carries
+/// the input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("not a valid identifier (expected a UUID)")]
+pub struct IdParseError;
 
 /// Defines a UUID newtype. Each id kind is a separate type, so passing a
 /// `KeyId` where an `EnvironmentId` is expected does not compile.
@@ -26,6 +34,22 @@ macro_rules! id_type {
         impl Default for $name {
             fn default() -> Self {
                 Self::new()
+            }
+        }
+
+        /// Hyphenated lowercase UUID, e.g. `0b9e6d3c-5f1a-4c8e-9d2b-7a6e1f3c8b40`.
+        impl fmt::Display for $name {
+            fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                todo!()
+            }
+        }
+
+        /// Parses the text form produced by `Display`.
+        impl FromStr for $name {
+            type Err = IdParseError;
+
+            fn from_str(_text: &str) -> Result<Self, Self::Err> {
+                todo!()
             }
         }
 
@@ -93,6 +117,25 @@ mod tests {
             .unwrap();
         assert_eq!(back, id);
         assert_eq!(len, 16);
+    }
+
+    #[test]
+    fn id_text_form_is_hyphenated_lowercase_uuid() {
+        let id: ProjectId = "0B9E6D3C-5F1A-4C8E-9D2B-7A6E1F3C8B40".parse().unwrap();
+        assert_eq!(id.to_string(), "0b9e6d3c-5f1a-4c8e-9d2b-7a6e1f3c8b40");
+    }
+
+    #[test]
+    fn id_round_trips_through_text() {
+        let id = ProjectId::new();
+        assert_eq!(id.to_string().parse::<ProjectId>(), Ok(id));
+    }
+
+    #[test]
+    fn id_rejects_non_uuid_text() {
+        for text in ["", "payments", "0b9e6d3c-5f1a-4c8e-9d2b", "hunter2"] {
+            assert_eq!(text.parse::<ProjectId>(), Err(IdParseError), "{text:?}");
+        }
     }
 
     #[test]

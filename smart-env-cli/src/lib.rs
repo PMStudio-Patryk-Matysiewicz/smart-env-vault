@@ -10,9 +10,11 @@ mod env_ref;
 mod error;
 mod exit;
 mod interaction;
+mod project_file;
 
 pub use cli::{Cli, Command, GlobalArgs, InjectArg, execute};
 pub use env_ref::{EnvRef, EnvRefError};
 pub use error::CliError;
 pub use exit::Exit;
 pub use interaction::Interaction;
+pub use project_file::{FILE_NAME, ProjectFile, ProjectFileError, ResolvedProject};

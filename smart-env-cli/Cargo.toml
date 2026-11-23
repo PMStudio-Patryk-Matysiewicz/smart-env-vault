@@ -15,3 +15,7 @@ path = "src/main.rs"
 smart-env-vault = { path = "../smart-env-vault" }
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"
+toml_edit = "0.25"
+
+[dev-dependencies]
+tempfile = "3"

@@ -25,18 +25,23 @@ impl fmt::Display for EnvRefError {
 
 impl std::error::Error for EnvRefError {}
 
+/// Shape of one part of `[project/]environment`: not empty, no whitespace,
+/// no `/`. Shared with `smart-env.toml`.
+pub(crate) fn is_valid_part(part: &str) -> bool {
+    !part.is_empty() && !part.contains(char::is_whitespace) && !part.contains('/')
+}
+
 impl FromStr for EnvRef {
     type Err = EnvRefError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        let valid = |part: &str| !part.is_empty() && !part.contains(char::is_whitespace);
         match input.split_once('/') {
-            None if valid(input) => Ok(Self {
+            None if is_valid_part(input) => Ok(Self {
                 project: None,
                 environment: input.to_owned(),
             }),
             Some((project, environment))
-                if valid(project) && valid(environment) && !environment.contains('/') =>
+                if is_valid_part(project) && is_valid_part(environment) =>
             {
                 Ok(Self {
                     project: Some(project.to_owned()),

@@ -2336,6 +2336,7 @@ dependencies = [
  "tempfile",
  "toml_edit",
  "whoami",
+ "zeroize",
 ]
 
 [[package]]

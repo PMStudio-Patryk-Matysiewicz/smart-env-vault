@@ -205,9 +205,9 @@ fn not_found_error_points_to_init() {
     assert_eq!(error.exit(), Exit::NotFound);
     assert_eq!(
         error.message(),
-        "Brak smart-env.toml w tym katalogu ani wyżej."
+        "No smart-env.toml in this directory or any parent."
     );
-    assert_eq!(error.hint(), Some("Uruchom: smart-env init"));
+    assert_eq!(error.hint(), Some("Run: smart-env init"));
 }
 
 #[test]

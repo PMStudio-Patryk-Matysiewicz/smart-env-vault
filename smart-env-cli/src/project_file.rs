@@ -63,7 +63,7 @@ impl ResolvedProject {
     /// Warning to show when the project was renamed since the file was written.
     pub fn warning(&self) -> Option<String> {
         self.renamed_to.as_ref().map(|name| {
-            format!("Projekt nazywa się teraz {name} — zaktualizuj project w smart-env.toml.")
+            format!("The project is now called {name} — update project in smart-env.toml.")
         })
     }
 }
@@ -171,19 +171,19 @@ impl ProjectFile {
                     "project_id_mismatch",
                     Exit::Conflict,
                     format!(
-                        "Projekt {} w vaulcie ma inny project_id niż w smart-env.toml — nie aktywowano.",
+                        "Project {} has a different project_id in the vault than in smart-env.toml — not activated.",
                         self.project
                     ),
                 )
                 .with_hint(
-                    "smart-env.toml mógł zostać podmieniony w repozytorium; sprawdź: git log -p smart-env.toml",
+                    "smart-env.toml may have been changed in the repository; check: git log -p smart-env.toml",
                 ),
                 None => CliError::new(
                     "project_not_found",
                     Exit::NotFound,
-                    format!("Projektu {} ze smart-env.toml nie ma w tym vaulcie.", self.project),
+                    format!("Project {} from smart-env.toml is not in this vault.", self.project),
                 )
-                .with_hint("Utwórz projekt z plików .env: smart-env init"),
+                .with_hint("Create the project from your .env files: smart-env init"),
             }),
             Err(error) => Err(error.into()),
         }
@@ -192,33 +192,33 @@ impl ProjectFile {
 
 impl From<ProjectFileError> for CliError {
     fn from(error: ProjectFileError) -> Self {
-        let required = "Wymagane klucze: project, project_id, environment";
+        let required = "Required keys: project, project_id, environment";
         let (code, exit, message, hint) = match error {
             ProjectFileError::NotFound => (
                 "project_file_not_found",
                 Exit::NotFound,
-                "Brak smart-env.toml w tym katalogu ani wyżej.".to_owned(),
-                "Uruchom: smart-env init".to_owned(),
+                "No smart-env.toml in this directory or any parent.".to_owned(),
+                "Run: smart-env init".to_owned(),
             ),
             ProjectFileError::Unreadable(path) => (
                 "project_file_unreadable",
                 Exit::Failure,
-                format!("Nie można odczytać {}.", path.display()),
-                "Sprawdź uprawnienia pliku i katalogu".to_owned(),
+                format!("Cannot read {}.", path.display()),
+                "Check the file and directory permissions".to_owned(),
             ),
             ProjectFileError::Syntax { line } => (
                 "project_file_syntax",
                 Exit::Failure,
                 match line {
-                    Some(line) => format!("smart-env.toml: błąd składni TOML w linii {line}."),
-                    None => "smart-env.toml: błąd składni TOML.".to_owned(),
+                    Some(line) => format!("smart-env.toml: TOML syntax error on line {line}."),
+                    None => "smart-env.toml: TOML syntax error.".to_owned(),
                 },
-                "Popraw plik; składnia: https://toml.io".to_owned(),
+                "Fix the file; syntax: https://toml.io".to_owned(),
             ),
             ProjectFileError::MissingKey(key) => (
                 "project_file_missing_key",
                 Exit::Failure,
-                format!("smart-env.toml: brak klucza {key}."),
+                format!("smart-env.toml: missing key {key}."),
                 required.to_owned(),
             ),
             ProjectFileError::UnknownKey(key) => {
@@ -227,23 +227,23 @@ impl From<ProjectFileError> for CliError {
                 (
                     "project_file_unknown_key",
                     Exit::Failure,
-                    format!("smart-env.toml: nieznany klucz {key}."),
+                    format!("smart-env.toml: unknown key {key}."),
                     format!(
-                        "smart-env.toml nie przechowuje sekretów — usuń klucz z pliku i zapisz zmienną: smart-env set {key}"
+                        "smart-env.toml does not hold secrets — remove the key from the file and store the variable: smart-env set {key}"
                     ),
                 )
             }
             ProjectFileError::InvalidValue(key) => (
                 "project_file_invalid_value",
                 Exit::Failure,
-                format!("smart-env.toml: nieprawidłowa wartość {key}."),
+                format!("smart-env.toml: invalid value for {key}."),
                 match key {
-                    "project_id" => "project_id to identyfikator UUID nadany przez smart-env init",
+                    "project_id" => "project_id is the UUID assigned by smart-env init",
                     "project" | "environment" => {
-                        "Nazwa bez spacji, znaków sterujących i /, w cudzysłowie"
+                        "A quoted name without spaces, control characters or /"
                     }
-                    "sync" => "Cele synchronizacji jako tabele, np. [sync.github]",
-                    _ => "Wartość w cudzysłowie, np. server = \"https://…\"",
+                    "sync" => "Sync targets as tables, e.g. [sync.github]",
+                    _ => "A quoted value, e.g. server = \"https://…\"",
                 }
                 .to_owned(),
             ),

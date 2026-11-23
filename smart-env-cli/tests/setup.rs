@@ -260,9 +260,9 @@ fn setup_reports_progress_in_contract_order() {
             .position(|line| line.contains(needle))
             .unwrap_or_else(|| panic!("missing line with {needle:?} in {lines:?}"))
     };
-    let confirmed = position("✓ Klucz odzyskiwania potwierdzony");
-    let key = position("✓ Klucz urządzenia zapisany");
-    let vault = position("✓ Utworzono vault");
+    let confirmed = position("✓ Recovery key confirmed");
+    let key = position("✓ Device key saved");
+    let vault = position("✓ Vault created");
     assert!(confirmed < key && key < vault);
     assert!(lines[vault].contains(&machine.data.display().to_string()));
     assert!(lines.last().unwrap().contains("smart-env init"));
@@ -275,8 +275,8 @@ fn warning_about_losing_the_recovery_key_is_shown() {
 
     machine.run(&["setup"], Some(&mut terminal));
 
-    assert!(terminal.transcript.contains("pokazany tylko raz"));
-    assert!(terminal.transcript.contains("utratę sekretów"));
+    assert!(terminal.transcript.contains("shown only once"));
+    assert!(terminal.transcript.contains("losing your secrets"));
 }
 
 // --- confirmation ---
@@ -389,7 +389,7 @@ fn second_setup_is_already_configured_and_changes_nothing() {
     assert_eq!(run.exit, Exit::Success);
     assert_eq!(terminal.questions, 0);
     assert!(!terminal.transcript.contains("AGE-SECRET-KEY"));
-    assert!(run.stdout.contains("już"));
+    assert!(run.stdout.contains("already set up"));
     assert_eq!(machine.vault().recipients().unwrap(), before);
     assert_eq!(machine.vault().members().unwrap().len(), 1);
 }

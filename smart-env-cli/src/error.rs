@@ -31,7 +31,7 @@ impl CliError {
 
     /// Wrong usage of the command line (code `usage`, exit 2).
     pub fn usage(message: impl Into<String>) -> Self {
-        Self::new("usage", Exit::Usage, message).with_hint("Pomoc: smart-env --help")
+        Self::new("usage", Exit::Usage, message).with_hint("Help: smart-env --help")
     }
 
     /// The action needs a confirmation but there is no terminal to ask and no
@@ -40,9 +40,9 @@ impl CliError {
         Self::new(
             "confirmation_required",
             Exit::Usage,
-            format!("Potrzebne potwierdzenie ({action}), a nie ma terminala, żeby o nie zapytać."),
+            format!("Confirmation needed ({action}), but there is no terminal to ask."),
         )
-        .with_hint("Potwierdź z góry flagą --yes")
+        .with_hint("Confirm up front with --yes")
     }
 
     /// Stable machine-readable code, e.g. `environment_not_found`.
@@ -92,169 +92,170 @@ impl CliError {
 impl From<VaultError> for CliError {
     fn from(error: VaultError) -> Self {
         use Exit::{Access, Conflict, Failure, NotFound, Usage};
-        let doctor = "Diagnoza: smart-env doctor";
+        let doctor = "Diagnose: smart-env doctor";
         let (code, exit, message, hint) = match error {
             VaultError::ProjectNotFound => (
                 "project_not_found",
                 NotFound,
-                "Nie znaleziono projektu.".to_owned(),
-                "Sprawdź nazwę projektu w --env lub w smart-env.toml",
+                "Project not found.".to_owned(),
+                "Check the project name in --env or smart-env.toml",
             ),
             VaultError::EnvironmentNotFound => (
                 "environment_not_found",
                 NotFound,
-                "Nie znaleziono środowiska.".to_owned(),
-                "Sprawdź nazwę środowiska w --env lub w smart-env.toml",
+                "Environment not found.".to_owned(),
+                "Check the environment name in --env or smart-env.toml",
             ),
             VaultError::SecretNotFound => (
                 "secret_not_found",
                 NotFound,
-                "Nie znaleziono zmiennej.".to_owned(),
-                "Lista zmiennych: smart-env ls",
+                "Variable not found.".to_owned(),
+                "List variables: smart-env ls",
             ),
             VaultError::RecipientNotFound => (
                 "recipient_not_found",
                 NotFound,
-                "Nie znaleziono odbiorcy klucza.".to_owned(),
+                "Key recipient not found.".to_owned(),
                 doctor,
             ),
             VaultError::AccountNotFound => (
                 "account_not_found",
                 NotFound,
-                "Nie znaleziono konta.".to_owned(),
+                "Account not found.".to_owned(),
                 doctor,
             ),
             VaultError::AlreadyMember => (
                 "already_member",
                 Conflict,
-                "To konto już jest członkiem vaulta.".to_owned(),
-                "Nic nie trzeba robić",
+                "This account is already a member of the vault.".to_owned(),
+                "Nothing to do",
             ),
             VaultError::NotAMember => (
                 "not_a_member",
                 Access,
-                "Konto nie jest członkiem tego vaulta, więc jego urządzenie nie dostanie dostępu."
+                "The account is not a member of this vault, so its device gets no access."
                     .to_owned(),
-                "Najpierw dodaj konto do vaulta jako członka",
+                "Add the account to the vault as a member first",
             ),
             VaultError::DeviceNeedsAccount => (
                 "device_needs_account",
                 Failure,
-                "Urządzenie musi należeć do konta.".to_owned(),
+                "A device must belong to an account.".to_owned(),
                 doctor,
             ),
             VaultError::NothingToUndo => (
                 "nothing_to_undo",
                 NotFound,
-                "Brak wcześniejszej wersji do przywrócenia.".to_owned(),
-                "Historia zmiennej: smart-env history NAZWA",
+                "No earlier version to restore.".to_owned(),
+                "Variable history: smart-env history NAME",
             ),
             VaultError::ProjectNameTaken => (
                 "project_name_taken",
                 Conflict,
-                "Projekt o tej nazwie już istnieje.".to_owned(),
-                "Wybierz inną nazwę projektu",
+                "A project with this name already exists.".to_owned(),
+                "Choose another project name",
             ),
             VaultError::EnvironmentNameTaken => (
                 "environment_name_taken",
                 Conflict,
-                "Środowisko o tej nazwie już istnieje w projekcie.".to_owned(),
-                "Wybierz inną nazwę środowiska",
+                "An environment with this name already exists in the project.".to_owned(),
+                "Choose another environment name",
             ),
             VaultError::SecretNameTaken => (
                 "secret_name_taken",
                 Conflict,
-                "Zmienna o tej nazwie już istnieje (także usunięta).".to_owned(),
-                "Wybierz inną nazwę albo przywróć usuniętą: smart-env undo NAZWA",
+                "A variable with this name already exists (possibly removed).".to_owned(),
+                "Choose another name or restore the removed one: smart-env undo NAME",
             ),
             VaultError::RecipientKeyTaken => (
                 "recipient_key_taken",
                 Conflict,
-                "Ten klucz już jest odbiorcą vaulta.".to_owned(),
-                "Nic nie trzeba robić",
+                "This key is already a recipient of the vault.".to_owned(),
+                "Nothing to do",
             ),
             VaultError::DuplicateName(name) => (
                 "duplicate_name",
                 Conflict,
-                format!("Zmienna {name} występuje w imporcie więcej niż raz; nic nie zapisano."),
-                "Usuń powtórzenie i spróbuj ponownie",
+                format!("Variable {name} appears more than once in the import; nothing was saved."),
+                "Remove the duplicate and try again",
             ),
             VaultError::AlreadyExists => (
                 "vault_exists",
                 Conflict,
-                "Vault już istnieje.".to_owned(),
-                "Nic nie trzeba robić — smart-env setup był już wykonany",
+                "The vault already exists.".to_owned(),
+                "Nothing to do — smart-env setup has already run",
             ),
             VaultError::UnsupportedSchema => (
                 "unsupported_vault",
                 Failure,
-                "Plik nie jest vaultem smart-env albo pochodzi z nowszej wersji.".to_owned(),
-                "Zaktualizuj smart-env albo sprawdź: smart-env doctor",
+                "The file is not a smart-env vault or comes from a newer version.".to_owned(),
+                "Update smart-env or check: smart-env doctor",
             ),
             VaultError::NoRecipients => (
                 "no_recipients",
                 Failure,
-                "Vault nie ma aktywnego odbiorcy klucza.".to_owned(),
+                "The vault has no active key recipient.".to_owned(),
                 doctor,
             ),
             VaultError::Key(KeyError::Unwrap) => (
                 "key_mismatch",
                 Access,
-                "Klucz tego urządzenia nie otwiera tego środowiska.".to_owned(),
+                "This device's key does not open this environment.".to_owned(),
                 doctor,
             ),
             VaultError::Key(KeyError::KeychainUnavailable) => (
                 "keychain_unavailable",
                 Access,
-                "Systemowy keychain jest niedostępny, a klucz nie jest odblokowany.".to_owned(),
-                "Odblokuj klucz: smart-env unlock",
+                "The system keychain is unavailable and the key is not unlocked.".to_owned(),
+                "Unlock the key: smart-env unlock",
             ),
             VaultError::Key(KeyError::WrongPassphrase) => (
                 "wrong_passphrase",
                 Access,
-                "Nieprawidłowe hasło do pliku klucza.".to_owned(),
-                "Spróbuj ponownie: smart-env unlock",
+                "Wrong passphrase for the key file.".to_owned(),
+                "Try again: smart-env unlock",
             ),
             VaultError::Key(_) => (
                 "key_error",
                 Failure,
-                "Nie udało się użyć klucza urządzenia.".to_owned(),
+                "Could not use the device key.".to_owned(),
                 doctor,
             ),
             VaultError::Secret(SecretError::InvalidName) => (
                 "invalid_name",
                 Usage,
-                "Nieprawidłowa nazwa zmiennej.".to_owned(),
-                "Nazwa: litery, cyfry i _, nie zaczyna się cyfrą, do 255 znaków",
+                "Invalid variable name.".to_owned(),
+                "Name: letters, digits and _, not starting with a digit, up to 255 characters",
             ),
             VaultError::Secret(SecretError::ValueTooLarge) => (
                 "value_too_large",
                 Usage,
-                "Wartość jest większa niż 64 KiB.".to_owned(),
-                "Zapisz większe dane w pliku, a w zmiennej ścieżkę do niego",
+                "The value is larger than 64 KiB.".to_owned(),
+                "Keep larger data in a file and store its path in the variable",
             ),
             VaultError::Secret(SecretError::InvalidValue) => (
                 "invalid_value",
                 Usage,
-                "Wartość zawiera bajt NUL.".to_owned(),
-                "Usuń bajt NUL z wartości",
+                "The value contains a NUL byte.".to_owned(),
+                "Remove the NUL byte from the value",
             ),
             VaultError::Secret(SecretError::Decrypt) => (
                 "decrypt_failed",
                 Failure,
-                "Wartości nie da się odszyfrować — dane są uszkodzone lub podmienione.".to_owned(),
+                "The value cannot be decrypted — the data is corrupted or was tampered with."
+                    .to_owned(),
                 doctor,
             ),
             VaultError::Secret(_) => (
                 "crypto_error",
                 Failure,
-                "Błąd szyfrowania.".to_owned(),
+                "Encryption error.".to_owned(),
                 doctor,
             ),
             VaultError::Storage(_) | VaultError::Io(_) => (
                 "storage_error",
                 Failure,
-                "Błąd odczytu lub zapisu vaulta.".to_owned(),
+                "Could not read or write the vault.".to_owned(),
                 doctor,
             ),
         };

@@ -11,7 +11,7 @@ use crate::{CliError, Context, EnvRef, Exit, Interaction, setup};
 #[command(
     name = "smart-env",
     version,
-    about = "Sekrety projektu bez plików .env"
+    about = "Project secrets without .env files"
 )]
 pub struct Cli {
     /// Flags accepted by every command.
@@ -26,7 +26,7 @@ pub struct Cli {
 #[derive(Debug, Args)]
 pub struct GlobalArgs {
     /// `<environment>` or `<project>/<environment>`.
-    #[arg(long, global = true, value_name = "[PROJEKT/]ŚRODOWISKO")]
+    #[arg(long, global = true, value_name = "[PROJECT/]ENVIRONMENT")]
     pub env: Option<EnvRef>,
     /// Machine-readable output, errors included.
     #[arg(long, global = true)]
@@ -193,9 +193,9 @@ fn dispatch(
         _ => Err(CliError::new(
             "not_implemented",
             Exit::Failure,
-            format!("Komenda {} nie jest jeszcze dostępna.", cli.command.name()),
+            format!("Command {} is not available yet.", cli.command.name()),
         )
-        .with_hint("Dostępne komendy: smart-env --help")),
+        .with_hint("Available commands: smart-env --help")),
     }
 }
 
@@ -209,20 +209,20 @@ fn usage_error(error: &clap::Error) -> CliError {
         _ => String::new(),
     };
     let message = match error.kind() {
-        ErrorKind::InvalidSubcommand => "Nieznana komenda.".to_owned(),
-        ErrorKind::UnknownArgument => "Nieoczekiwany argument.".to_owned(),
+        ErrorKind::InvalidSubcommand => "Unknown command.".to_owned(),
+        ErrorKind::UnknownArgument => "Unexpected argument.".to_owned(),
         ErrorKind::MissingSubcommand | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
-            "Brak komendy.".to_owned()
+            "Missing command.".to_owned()
         }
-        ErrorKind::MissingRequiredArgument => format!("Brak wymaganego argumentu{}", own_arg()),
+        ErrorKind::MissingRequiredArgument => format!("Missing required argument{}", own_arg()),
         ErrorKind::InvalidValue | ErrorKind::ValueValidation => {
-            format!("Nieprawidłowa wartość{}", own_arg())
+            format!("Invalid value{}", own_arg())
         }
-        ErrorKind::ArgumentConflict => format!("Wykluczające się argumenty{}", own_arg()),
+        ErrorKind::ArgumentConflict => format!("Conflicting arguments{}", own_arg()),
         ErrorKind::TooManyValues | ErrorKind::WrongNumberOfValues => {
-            format!("Zła liczba wartości{}", own_arg())
+            format!("Wrong number of values{}", own_arg())
         }
-        _ => "Błędne użycie.".to_owned(),
+        _ => "Invalid usage.".to_owned(),
     };
     CliError::usage(message)
 }

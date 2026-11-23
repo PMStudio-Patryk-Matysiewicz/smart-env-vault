@@ -16,27 +16,27 @@ fn human_error_should_show_message_and_indented_hint() {
     let error = CliError::new(
         "no_config",
         Exit::NotFound,
-        "Brak smart-env.toml w tym katalogu ani wyżej.",
+        "No smart-env.toml in this directory or any parent.",
     )
-    .with_hint("Uruchom: smart-env init");
+    .with_hint("Run: smart-env init");
 
     assert_eq!(
         error.render_human(),
-        "✗ Brak smart-env.toml w tym katalogu ani wyżej.\n  Uruchom: smart-env init\n"
+        "✗ No smart-env.toml in this directory or any parent.\n  Run: smart-env init\n"
     );
 }
 
 #[test]
 fn human_error_without_hint_should_be_one_line() {
-    let error = CliError::new("failure", Exit::Failure, "Coś poszło nie tak.");
+    let error = CliError::new("failure", Exit::Failure, "Something went wrong.");
 
-    assert_eq!(error.render_human(), "✗ Coś poszło nie tak.\n");
+    assert_eq!(error.render_human(), "✗ Something went wrong.\n");
 }
 
 #[test]
 fn json_error_should_have_code_message_and_hint() {
-    let error = CliError::new("no_config", Exit::NotFound, "Brak smart-env.toml.")
-        .with_hint("Uruchom: smart-env init");
+    let error = CliError::new("no_config", Exit::NotFound, "No smart-env.toml.")
+        .with_hint("Run: smart-env init");
 
     let json: serde_json::Value = serde_json::from_str(&error.render_json()).unwrap();
 
@@ -44,15 +44,15 @@ fn json_error_should_have_code_message_and_hint() {
         json,
         serde_json::json!({"error": {
             "code": "no_config",
-            "message": "Brak smart-env.toml.",
-            "hint": "Uruchom: smart-env init"
+            "message": "No smart-env.toml.",
+            "hint": "Run: smart-env init"
         }})
     );
 }
 
 #[test]
 fn json_error_without_hint_should_have_null_hint() {
-    let error = CliError::new("failure", Exit::Failure, "Coś poszło nie tak.");
+    let error = CliError::new("failure", Exit::Failure, "Something went wrong.");
 
     let json: serde_json::Value = serde_json::from_str(&error.render_json()).unwrap();
 
@@ -61,29 +61,29 @@ fn json_error_without_hint_should_have_null_hint() {
 
 #[test]
 fn json_error_should_escape_quotes_and_newlines() {
-    let error = CliError::new("failure", Exit::Failure, "zła \"nazwa\"\nw linii");
+    let error = CliError::new("failure", Exit::Failure, "bad \"name\"\non line");
 
     let json: serde_json::Value = serde_json::from_str(&error.render_json()).unwrap();
 
-    assert_eq!(json["error"]["message"], "zła \"nazwa\"\nw linii");
+    assert_eq!(json["error"]["message"], "bad \"name\"\non line");
 }
 
 #[test]
 fn usage_error_should_exit_with_2() {
-    let error = CliError::usage("Nieznana flaga.");
+    let error = CliError::usage("Unknown flag.");
 
     assert_eq!(error.code(), "usage");
     assert_eq!(error.exit(), Exit::Usage);
-    assert_eq!(error.message(), "Nieznana flaga.");
+    assert_eq!(error.message(), "Unknown flag.");
 }
 
 #[test]
 fn confirmation_required_should_point_at_yes_flag() {
-    let error = CliError::confirmation_required("usunięcie plików .env");
+    let error = CliError::confirmation_required("deleting .env files");
 
     assert_eq!(error.code(), "confirmation_required");
     assert_eq!(error.exit(), Exit::Usage);
-    assert!(error.message().contains("usunięcie plików .env"));
+    assert!(error.message().contains("deleting .env files"));
     assert!(error.hint().unwrap().contains("--yes"));
 }
 

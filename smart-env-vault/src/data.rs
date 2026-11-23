@@ -50,6 +50,7 @@ pub struct DataPaths {
     directory: PathBuf,
     vault_db: PathBuf,
     state_db: PathBuf,
+    key_file: PathBuf,
 }
 
 impl DataPaths {
@@ -64,10 +65,12 @@ impl DataPaths {
         let directory = directory.into();
         let vault_db = directory.join("vault.db");
         let state_db = directory.join("state.db");
+        let key_file = directory.join("device.key");
         Self {
             directory,
             vault_db,
             state_db,
+            key_file,
         }
     }
 
@@ -84,7 +87,7 @@ impl DataPaths {
     /// Passphrase-encrypted device key file; it exists only in passphrase
     /// mode (no system keychain).
     pub fn key_file(&self) -> &Path {
-        todo!()
+        &self.key_file
     }
 
     /// Local, device-specific state database path.

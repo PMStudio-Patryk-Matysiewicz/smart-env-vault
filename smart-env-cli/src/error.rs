@@ -215,6 +215,18 @@ impl From<VaultError> for CliError {
                 "Wrong passphrase for the key file.".to_owned(),
                 "Try again: smart-env unlock",
             ),
+            VaultError::Key(KeyError::Locked) => (
+                "key_locked",
+                Access,
+                "The device key is locked.".to_owned(),
+                "Unlock it: smart-env unlock",
+            ),
+            VaultError::Key(KeyError::SessionUnavailable) => (
+                "session_keyring_unavailable",
+                Failure,
+                "The kernel keyring that keeps the unlocked key is unavailable.".to_owned(),
+                "Passphrase mode needs the Linux kernel keyring (some containers block it); diagnose: smart-env doctor",
+            ),
             VaultError::Key(_) => (
                 "key_error",
                 Failure,

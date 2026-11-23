@@ -4,9 +4,10 @@
 use smart_env_vault::{DeviceKey, KernelKeyringStore, KeyStore};
 use std::time::Duration;
 
-fn store(ttl: Duration) -> KernelKeyringStore {
+/// Entry unique per process and test (tests run in parallel).
+fn store(test: &str, ttl: Duration) -> KernelKeyringStore {
     KernelKeyringStore::named(
-        &format!("smart-env-test:{}:{:?}", std::process::id(), ttl),
+        &format!("smart-env-test:{}:{test}", std::process::id()),
         ttl,
     )
 }
@@ -14,7 +15,7 @@ fn store(ttl: Duration) -> KernelKeyringStore {
 #[test]
 #[ignore = "requires the Linux kernel keyring"]
 fn kernel_keyring_round_trip() {
-    let store = store(Duration::from_secs(60));
+    let store = store("round_trip", Duration::from_secs(60));
     let key = DeviceKey::generate();
 
     assert!(store.load().unwrap().is_none());
@@ -28,7 +29,7 @@ fn kernel_keyring_round_trip() {
 #[test]
 #[ignore = "requires the Linux kernel keyring"]
 fn kernel_keyring_entry_expires() {
-    let store = store(Duration::from_secs(1));
+    let store = store("expires", Duration::from_secs(1));
     store.save(&DeviceKey::generate()).unwrap();
 
     std::thread::sleep(Duration::from_millis(2_500));
@@ -39,7 +40,7 @@ fn kernel_keyring_entry_expires() {
 #[test]
 #[ignore = "requires the Linux kernel keyring"]
 fn saving_again_replaces_the_key() {
-    let store = store(Duration::from_secs(60));
+    let store = store("replace", Duration::from_secs(60));
     let (first, second) = (DeviceKey::generate(), DeviceKey::generate());
 
     store.save(&first).unwrap();

@@ -100,8 +100,8 @@ impl KeyStore for KeychainStore {
 /// is deleted (`smart-env lock`). Outside Linux every call returns
 /// [`KeyError::SessionUnavailable`].
 pub struct KernelKeyringStore {
-    _description: String,
-    _ttl: std::time::Duration,
+    description: String,
+    ttl: std::time::Duration,
 }
 
 impl KernelKeyringStore {
@@ -114,23 +114,84 @@ impl KernelKeyringStore {
     /// unlocked key).
     pub fn named(description: &str, ttl: std::time::Duration) -> Self {
         Self {
-            _description: description.to_owned(),
-            _ttl: ttl,
+            description: description.to_owned(),
+            ttl,
         }
     }
 }
 
-impl KeyStore for KernelKeyringStore {
-    fn load(&self) -> Result<Option<DeviceKey>, KeyError> {
-        todo!()
+#[cfg(target_os = "linux")]
+impl KernelKeyringStore {
+    fn keyring() -> Result<linux_keyutils::KeyRing, KeyError> {
+        linux_keyutils::KeyRing::from_special_id(linux_keyutils::KeyRingIdentifier::User, false)
+            .map_err(|_| KeyError::SessionUnavailable)
     }
 
-    fn save(&self, _key: &DeviceKey) -> Result<(), KeyError> {
-        todo!()
+    /// The entry, `None` if it does not exist, expired or was revoked.
+    fn find(&self) -> Result<Option<linux_keyutils::Key>, KeyError> {
+        use linux_keyutils::KeyError as Kernel;
+        match Self::keyring()?.search(&self.description) {
+            Ok(key) => Ok(Some(key)),
+            Err(Kernel::KeyDoesNotExist | Kernel::KeyExpired | Kernel::KeyRevoked) => Ok(None),
+            Err(_) => Err(KeyError::SessionUnavailable),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl KeyStore for KernelKeyringStore {
+    fn load(&self) -> Result<Option<DeviceKey>, KeyError> {
+        use linux_keyutils::KeyError as Kernel;
+        let Some(key) = self.find()? else {
+            return Ok(None);
+        };
+        let bytes = match key.read_to_vec() {
+            Ok(bytes) => zeroize::Zeroizing::new(bytes),
+            // Expired or revoked between the search and the read.
+            Err(Kernel::KeyDoesNotExist | Kernel::KeyExpired | Kernel::KeyRevoked) => {
+                return Ok(None);
+            }
+            Err(_) => return Err(KeyError::SessionUnavailable),
+        };
+        let text = std::str::from_utf8(&bytes).map_err(|_| KeyError::InvalidDeviceKey)?;
+        DeviceKey::from_secret(&SecretString::from(text)).map(Some)
+    }
+
+    fn save(&self, key: &DeviceKey) -> Result<(), KeyError> {
+        // `add_key` replaces an entry with the same description.
+        let entry = Self::keyring()?
+            .add_key(&self.description, key.to_secret().expose_secret())
+            .map_err(|_| KeyError::SessionUnavailable)?;
+        let seconds = usize::try_from(self.ttl.as_secs().max(1)).unwrap_or(usize::MAX);
+        if entry.set_timeout(seconds).is_err() {
+            // Never leave an entry without expiry behind.
+            let _ = entry.invalidate();
+            return Err(KeyError::SessionUnavailable);
+        }
+        Ok(())
     }
 
     fn delete(&self) -> Result<(), KeyError> {
-        todo!()
+        match self.find()? {
+            Some(entry) => entry.invalidate().map_err(|_| KeyError::SessionUnavailable),
+            None => Ok(()),
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+impl KeyStore for KernelKeyringStore {
+    fn load(&self) -> Result<Option<DeviceKey>, KeyError> {
+        let _ = (&self.description, self.ttl);
+        Err(KeyError::SessionUnavailable)
+    }
+
+    fn save(&self, _key: &DeviceKey) -> Result<(), KeyError> {
+        Err(KeyError::SessionUnavailable)
+    }
+
+    fn delete(&self) -> Result<(), KeyError> {
+        Err(KeyError::SessionUnavailable)
     }
 }
 

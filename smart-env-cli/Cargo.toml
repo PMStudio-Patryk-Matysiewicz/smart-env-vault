@@ -2,6 +2,7 @@
 name = "smart-env-cli"
 version = "0.1.0"
 edition = "2024"
+license = "FSL-1.1-ALv2"
 
 [lib]
 name = "smart_env_cli"

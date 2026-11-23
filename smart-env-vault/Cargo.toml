@@ -2,6 +2,7 @@
 name = "smart-env-vault"
 version = "0.1.0"
 edition = "2024"
+license = "FSL-1.1-ALv2"
 
 [dependencies]
 age = "0.12"

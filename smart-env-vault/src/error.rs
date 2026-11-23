@@ -3,7 +3,7 @@ use thiserror::Error;
 /// Errors of key management (device key, recovery key, DEK wrapping).
 ///
 /// Never carries key material.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum KeyError {
     /// The key is not a recipient of this envelope, or the envelope is corrupted.
     #[error("key does not match this envelope or the envelope is corrupted")]
@@ -29,6 +29,14 @@ pub enum KeyError {
     /// Reading or writing the key file failed.
     #[error("key storage error")]
     Storage,
+    /// The device key is kept in a passphrase file and is not unlocked (or
+    /// the unlock expired); `smart-env unlock` fixes it.
+    #[error("device key is locked")]
+    Locked,
+    /// The kernel keyring that holds the unlocked key cannot be used (not
+    /// Linux, or blocked, e.g. by a container's seccomp profile).
+    #[error("kernel keyring is unavailable")]
+    SessionUnavailable,
     /// The system random generator is unavailable.
     #[error("system random generator is unavailable")]
     Random,

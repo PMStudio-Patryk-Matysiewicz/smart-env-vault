@@ -1,192 +1,14 @@
-//! `smart-env setup` (plan: Plany/setup - Plan wdrożenia). In-process with a
-//! temporary data directory, an in-memory key store and a scripted terminal.
+//! `smart-env setup` (plan: Plany/setup - Plan wdrożenia, unlock+lock - Plan
+//! wdrożenia for passphrase mode). In-process with a temporary data
+//! directory, in-memory key stores and a scripted terminal.
 
+mod common;
+
+use common::*;
 use secrecy::SecretString;
-use smart_env_cli::{Context, Exit, Terminal, execute};
-use smart_env_vault::{
-    DataPaths, DeviceKey, KeyError, KeyStore, MemoryStore, RecipientKind, RecoveryKey, Role, Vault,
-};
+use smart_env_cli::{Exit, Terminal, execute};
+use smart_env_vault::{DeviceKey, KeyError, KeyStore, RecipientKind, RecoveryKey, Role};
 use std::io;
-use std::path::PathBuf;
-use tempfile::TempDir;
-
-// --- fakes ---
-
-/// Records everything shown; answers with a function of the transcript.
-struct ScriptedTerminal {
-    transcript: String,
-    questions: usize,
-    answer: Box<dyn FnMut(&str) -> String>,
-}
-
-impl ScriptedTerminal {
-    fn new(answer: impl FnMut(&str) -> String + 'static) -> Self {
-        Self {
-            transcript: String::new(),
-            questions: 0,
-            answer: Box::new(answer),
-        }
-    }
-
-    /// Answers every question with the last 4 characters of the shown key.
-    fn confirming() -> Self {
-        Self::new(|transcript| last4(&shown_key(transcript)))
-    }
-}
-
-impl Terminal for ScriptedTerminal {
-    fn show(&mut self, text: &str) {
-        self.transcript.push_str(text);
-    }
-
-    fn ask(&mut self, question: &str) -> io::Result<String> {
-        self.transcript.push_str(question);
-        self.questions += 1;
-        Ok((self.answer)(&self.transcript))
-    }
-}
-
-/// The recovery key as shown on the terminal (pre-SE-RECOVERY format).
-fn shown_key(transcript: &str) -> String {
-    transcript
-        .split_whitespace()
-        .find(|word| word.starts_with("AGE-SECRET-KEY-1"))
-        .expect("recovery key shown on the terminal")
-        .to_owned()
-}
-
-fn last4(key: &str) -> String {
-    key[key.len() - 4..].to_owned()
-}
-
-/// Key store whose keychain cannot be reached.
-struct UnavailableStore;
-
-impl KeyStore for UnavailableStore {
-    fn load(&self) -> Result<Option<DeviceKey>, KeyError> {
-        Err(KeyError::KeychainUnavailable)
-    }
-    fn save(&self, _: &DeviceKey) -> Result<(), KeyError> {
-        Err(KeyError::KeychainUnavailable)
-    }
-    fn delete(&self) -> Result<(), KeyError> {
-        Err(KeyError::KeychainUnavailable)
-    }
-}
-
-/// Key store that is empty and fails to save.
-struct FailingSaveStore;
-
-impl KeyStore for FailingSaveStore {
-    fn load(&self) -> Result<Option<DeviceKey>, KeyError> {
-        Ok(None)
-    }
-    fn save(&self, _: &DeviceKey) -> Result<(), KeyError> {
-        Err(KeyError::Storage)
-    }
-    fn delete(&self) -> Result<(), KeyError> {
-        Ok(())
-    }
-}
-
-// --- harness ---
-
-struct Machine {
-    _dir: TempDir,
-    data: PathBuf,
-    keys: Box<dyn KeyStore>,
-    account_label: String,
-    device_label: String,
-}
-
-struct Run {
-    exit: Exit,
-    stdout: String,
-    stderr: String,
-}
-
-impl Machine {
-    fn new() -> Self {
-        Self::with_keys(MemoryStore::default())
-    }
-
-    fn with_keys(keys: impl KeyStore + 'static) -> Self {
-        let dir = TempDir::new().unwrap();
-        let data = dir.path().join("smart-env");
-        Self {
-            _dir: dir,
-            data,
-            keys: Box::new(keys),
-            account_label: "trawers".to_owned(),
-            device_label: "laptop".to_owned(),
-        }
-    }
-
-    fn run(&self, args: &[&str], terminal: Option<&mut ScriptedTerminal>) -> Run {
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let mut ctx = Context {
-            data: Some(DataPaths::from_root(&self.data)),
-            keys: self.keys.as_ref(),
-            account_label: self.account_label.clone(),
-            device_label: self.device_label.clone(),
-            terminal: terminal.map(|t| t as &mut dyn Terminal),
-        };
-        let argv = std::iter::once("smart-env").chain(args.iter().copied());
-        let exit = execute(argv, &mut ctx, &mut out, &mut err);
-        Run {
-            exit,
-            stdout: String::from_utf8(out).unwrap(),
-            stderr: String::from_utf8(err).unwrap(),
-        }
-    }
-
-    /// `setup` on a terminal that confirms correctly; returns the run and
-    /// the shown recovery key.
-    fn setup(&self) -> (Run, String) {
-        let mut terminal = ScriptedTerminal::confirming();
-        let run = self.run(&["setup"], Some(&mut terminal));
-        let key = shown_key(&terminal.transcript);
-        (run, key)
-    }
-
-    fn vault_db(&self) -> PathBuf {
-        self.data.join("vault.db")
-    }
-
-    fn state_db(&self) -> PathBuf {
-        self.data.join("state.db")
-    }
-
-    fn vault(&self) -> Vault {
-        Vault::open(&self.vault_db()).unwrap()
-    }
-
-    fn stored_key(&self) -> Option<DeviceKey> {
-        self.keys.load().unwrap()
-    }
-
-    fn assert_nothing_written(&self) {
-        assert!(!self.vault_db().exists(), "vault.db left behind");
-        assert!(!self.state_db().exists(), "state.db left behind");
-        assert!(
-            self.keys.load().map_or(true, |key| key.is_none()),
-            "device key left behind"
-        );
-    }
-}
-
-fn json(stdout: &str) -> serde_json::Value {
-    serde_json::from_str(stdout.trim()).unwrap()
-}
-
-/// Error code from `--json` output.
-fn error_code(run: &Run) -> String {
-    json(&run.stdout)["error"]["code"]
-        .as_str()
-        .unwrap()
-        .to_owned()
-}
 
 // --- fresh setup ---
 
@@ -285,7 +107,7 @@ fn warning_about_losing_the_recovery_key_is_shown() {
 fn confirmation_ignores_case_and_surrounding_spaces() {
     let machine = Machine::new();
     let mut terminal =
-        ScriptedTerminal::new(|t| format!("  {}  ", last4(&shown_key(t)).to_lowercase()));
+        ScriptedTerminal::new(|t, _| format!("  {}  ", last4(&shown_key(t)).to_lowercase()));
 
     let run = machine.run(&["setup"], Some(&mut terminal));
 
@@ -296,7 +118,7 @@ fn confirmation_ignores_case_and_surrounding_spaces() {
 fn one_wrong_answer_then_right_succeeds() {
     let machine = Machine::new();
     let mut wrong_first = true;
-    let mut terminal = ScriptedTerminal::new(move |t| {
+    let mut terminal = ScriptedTerminal::new(move |t, _| {
         if std::mem::take(&mut wrong_first) {
             "????".to_owned()
         } else {
@@ -313,7 +135,7 @@ fn one_wrong_answer_then_right_succeeds() {
 #[test]
 fn three_wrong_answers_write_nothing() {
     let machine = Machine::new();
-    let mut terminal = ScriptedTerminal::new(|_| "????".to_owned());
+    let mut terminal = ScriptedTerminal::new(|_, _| "????".to_owned());
 
     let run = machine.run(&["setup", "--json"], Some(&mut terminal));
 
@@ -331,18 +153,15 @@ fn closed_terminal_during_confirmation_writes_nothing() {
         fn ask(&mut self, _: &str) -> io::Result<String> {
             Err(io::ErrorKind::UnexpectedEof.into())
         }
+        fn ask_secret(&mut self, _: &str) -> io::Result<SecretString> {
+            Err(io::ErrorKind::UnexpectedEof.into())
+        }
     }
     let machine = Machine::new();
     let mut out = Vec::new();
     let mut err = Vec::new();
     let mut terminal = ClosingTerminal;
-    let mut ctx = Context {
-        data: Some(DataPaths::from_root(&machine.data)),
-        keys: machine.keys.as_ref(),
-        account_label: "trawers".to_owned(),
-        device_label: "laptop".to_owned(),
-        terminal: Some(&mut terminal),
-    };
+    let mut ctx = machine.context(Some(&mut terminal));
 
     let exit = execute(["smart-env", "setup"], &mut ctx, &mut out, &mut err);
 
@@ -450,18 +269,148 @@ fn leftover_device_key_without_vault_is_reused() {
 
 // --- key store failures ---
 
+// --- passphrase mode (no system keychain; unlock+lock plan) ---
+
+const PASSPHRASE: &str = "correct horse battery";
+
 #[test]
-fn unavailable_keychain_fails_before_showing_recovery_key() {
-    let machine = Machine::with_keys(UnavailableStore);
-    let mut terminal = ScriptedTerminal::confirming();
+fn without_keychain_setup_uses_passphrase_file_and_unlocks() {
+    let machine = Machine::without_keychain();
+
+    let (run, _) = machine.setup_with_passphrase(PASSPHRASE);
+
+    assert_eq!(run.exit, Exit::Success, "stdout: {}", run.stdout);
+    assert!(machine.key_file().is_file());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(machine.key_file())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let unlocked = machine.unlocked_key().expect("key unlocked after setup");
+    let file_key = smart_env_vault::PassphraseFileStore::new(
+        machine.key_file(),
+        SecretString::from(PASSPHRASE),
+    )
+    .load()
+    .unwrap()
+    .unwrap();
+    assert_eq!(unlocked.public(), file_key.public());
+    assert_eq!(
+        machine.vault().recipients().unwrap()[0].public_key,
+        file_key.public()
+    );
+}
+
+#[test]
+fn passphrase_setup_reports_file_and_unlock_in_order() {
+    let machine = Machine::without_keychain();
+
+    let (run, _) = machine.setup_with_passphrase(PASSPHRASE);
+
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    let position = |needle: &str| {
+        lines
+            .iter()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("missing line with {needle:?} in {lines:?}"))
+    };
+    let confirmed = position("✓ Recovery key confirmed");
+    let file = position("✓ Device key saved in an encrypted file");
+    let unlocked = position("✓ Key unlocked for 8 h");
+    let vault = position("✓ Vault created");
+    assert!(confirmed < file && file < unlocked && unlocked < vault);
+    assert!(lines[file].contains(&machine.key_file().display().to_string()));
+    assert!(lines[unlocked].contains("smart-env lock"));
+}
+
+#[test]
+fn passphrase_is_asked_twice_before_the_recovery_key_and_never_echoed() {
+    let machine = Machine::without_keychain();
+    let mut terminal = ScriptedTerminal::with_passphrase(PASSPHRASE);
+
+    let run = machine.run(&["setup"], Some(&mut terminal));
+
+    assert_eq!(run.exit, Exit::Success);
+    assert_eq!(terminal.secret_questions, 2);
+    let notice = terminal
+        .transcript
+        .find("No system keychain")
+        .expect("notice shown");
+    let key = terminal.transcript.find("AGE-SECRET-KEY-1").unwrap();
+    assert!(notice < key);
+    assert!(!terminal.transcript.contains(PASSPHRASE));
+    assert!(!printed(&run).contains(PASSPHRASE));
+}
+
+#[test]
+fn passphrase_not_set_after_three_bad_attempts_writes_nothing() {
+    for (first, second) in [("long enough 1", "long enough 2"), ("short", "short")] {
+        let machine = Machine::without_keychain();
+        let mut repeat = false;
+        let mut terminal = ScriptedTerminal::new(move |t, question| {
+            if is_passphrase_question(question) {
+                repeat = !repeat;
+                if repeat { first } else { second }.to_owned()
+            } else {
+                last4(&shown_key(t))
+            }
+        });
+
+        let run = machine.run(&["setup", "--json"], Some(&mut terminal));
+
+        assert_eq!(run.exit, Exit::Failure, "{first:?}/{second:?}");
+        assert_eq!(error_code(&run), "passphrase_not_set");
+        assert_eq!(terminal.secret_questions, 6);
+        assert!(!terminal.transcript.contains("AGE-SECRET-KEY"));
+        machine.assert_nothing_written();
+    }
+}
+
+#[test]
+fn without_kernel_keyring_passphrase_setup_fails_before_asking() {
+    let machine = Machine::with_stores(
+        UnavailableStore(KeyError::KeychainUnavailable),
+        UnavailableStore(KeyError::SessionUnavailable),
+    );
+    let mut terminal = ScriptedTerminal::with_passphrase(PASSPHRASE);
 
     let run = machine.run(&["setup", "--json"], Some(&mut terminal));
 
-    assert_eq!(run.exit, Exit::Access);
-    assert_eq!(error_code(&run), "keychain_unavailable");
+    assert_eq!(error_code(&run), "session_keyring_unavailable");
     assert!(terminal.transcript.is_empty());
     assert!(!machine.vault_db().exists());
-    assert!(!machine.state_db().exists());
+    assert!(!machine.key_file().exists());
+}
+
+#[test]
+fn second_passphrase_setup_is_already_configured_without_asking() {
+    let machine = Machine::without_keychain();
+    machine.setup_with_passphrase(PASSPHRASE);
+    let mut terminal = ScriptedTerminal::with_passphrase(PASSPHRASE);
+
+    let run = machine.run(&["setup", "--json"], Some(&mut terminal));
+
+    assert_eq!(run.exit, Exit::Success);
+    assert_eq!(json(&run.stdout)["status"], "already_configured");
+    assert_eq!(terminal.secret_questions + terminal.questions, 0);
+}
+
+#[test]
+fn failed_vault_after_passphrase_setup_removes_key_file_and_unlock() {
+    // A state.db that is a directory makes creating the data files fail
+    // after the key file and the unlock were written.
+    let machine = Machine::without_keychain();
+    std::fs::create_dir_all(machine.state_db()).unwrap();
+
+    let (run, _) = machine.setup_with_passphrase(PASSPHRASE);
+
+    assert_ne!(run.exit, Exit::Success);
+    assert!(!machine.key_file().exists());
+    assert!(machine.unlocked_key().is_none());
 }
 
 #[test]

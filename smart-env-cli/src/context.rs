@@ -4,8 +4,13 @@
 //! directories and fakes.
 
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::time::Duration;
 
-use smart_env_vault::{DataPaths, KeyStore, KeychainStore};
+use secrecy::SecretString;
+use smart_env_vault::{DataPaths, KernelKeyringStore, KeyStore, KeychainStore};
+
+/// How long `unlock` keeps the device key in the kernel keyring (ADR-002).
+pub const UNLOCK_TTL: Duration = Duration::from_secs(8 * 60 * 60);
 
 /// The user's terminal: shows text and asks questions.
 ///
@@ -20,6 +25,11 @@ pub trait Terminal {
     /// # Errors
     /// Reading from the terminal failed or it was closed.
     fn ask(&mut self, question: &str) -> io::Result<String>;
+    /// Like [`Terminal::ask`], but the answer is not echoed (passphrases).
+    ///
+    /// # Errors
+    /// Reading from the terminal failed or it was closed.
+    fn ask_secret(&mut self, question: &str) -> io::Result<SecretString>;
 }
 
 /// Everything a command may use besides its arguments.
@@ -27,8 +37,11 @@ pub struct Context<'a> {
     /// Data directory (`vault.db`, `state.db`); `None` if the system did not
     /// provide one.
     pub data: Option<DataPaths>,
-    /// Where the device key is kept.
+    /// Where the device key is kept in keychain mode.
     pub keys: &'a dyn KeyStore,
+    /// Where the unlocked key is kept in passphrase mode (kernel keyring,
+    /// expires after [`UNLOCK_TTL`]).
+    pub session: &'a dyn KeyStore,
     /// Label of the owner account created by `setup` (system user name).
     pub account_label: String,
     /// Label of this device (host name).
@@ -41,6 +54,7 @@ pub struct Context<'a> {
 pub struct System {
     data: Option<DataPaths>,
     keys: KeychainStore,
+    session: KernelKeyringStore,
     account_label: String,
     device_label: String,
     terminal: Option<StdTerminal>,
@@ -58,6 +72,7 @@ impl System {
             } else {
                 user.clone()
             }),
+            session: KernelKeyringStore::new(UNLOCK_TTL),
             account_label: user,
             device_label: whoami::hostname().unwrap_or_default(),
             terminal: (io::stdin().is_terminal() && io::stderr().is_terminal())
@@ -70,6 +85,7 @@ impl System {
         Context {
             data: self.data.clone(),
             keys: &self.keys,
+            session: &self.session,
             account_label: self.account_label.clone(),
             device_label: self.device_label.clone(),
             terminal: self
@@ -97,5 +113,9 @@ impl Terminal for StdTerminal {
             return Err(io::ErrorKind::UnexpectedEof.into());
         }
         Ok(line.trim_end_matches(['\n', '\r']).to_owned())
+    }
+
+    fn ask_secret(&mut self, question: &str) -> io::Result<SecretString> {
+        rpassword::prompt_password(question).map(SecretString::from)
     }
 }

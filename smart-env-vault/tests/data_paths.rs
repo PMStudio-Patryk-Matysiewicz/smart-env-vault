@@ -35,6 +35,14 @@ fn from_root_should_return_vault_and_state_paths_below_directory() {
     assert_eq!(paths.state_db(), root.join("state.db"));
 }
 
+#[test]
+fn key_file_should_be_below_directory() {
+    let root = std::env::temp_dir().join("smart-env-test");
+    let paths = DataPaths::from_root(&root);
+
+    assert_eq!(paths.key_file(), root.join("device.key"));
+}
+
 #[cfg(unix)]
 #[test]
 fn initialize_should_set_directory_permissions_to_owner_only() {

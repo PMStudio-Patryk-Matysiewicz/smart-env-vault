@@ -4,7 +4,7 @@ use std::io::Write;
 use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::{CliError, Context, EnvRef, Exit, Interaction, setup};
+use crate::{CliError, Context, EnvRef, Exit, Interaction, lock, setup};
 
 /// `smart-env` command line.
 #[derive(Debug, Parser)]
@@ -190,6 +190,8 @@ fn dispatch(
 ) -> Result<Exit, CliError> {
     match cli.command {
         Command::Setup => setup::run(ctx, interaction, json, out),
+        Command::Unlock => lock::unlock(ctx, json, out),
+        Command::Lock => lock::lock(ctx, json, out),
         _ => Err(CliError::new(
             "not_implemented",
             Exit::Failure,

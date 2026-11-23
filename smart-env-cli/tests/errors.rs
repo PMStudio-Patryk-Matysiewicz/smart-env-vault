@@ -194,3 +194,17 @@ fn account_errors_should_map_to_contract_exit_codes() {
         assert!(error.hint().is_some(), "{code} should say how to fix it");
     }
 }
+
+#[test]
+fn locked_key_errors_should_map_to_contract_exit_codes() {
+    let locked = CliError::from(VaultError::Key(KeyError::Locked));
+    let no_keyring = CliError::from(VaultError::Key(KeyError::SessionUnavailable));
+
+    assert_eq!((locked.code(), locked.exit()), ("key_locked", Exit::Access));
+    assert!(locked.hint().unwrap().contains("smart-env unlock"));
+    assert_eq!(
+        (no_keyring.code(), no_keyring.exit()),
+        ("session_keyring_unavailable", Exit::Failure)
+    );
+    assert!(no_keyring.hint().is_some());
+}

@@ -92,6 +92,48 @@ impl KeyStore for KeychainStore {
     }
 }
 
+/// [`KeyStore`] for the unlocked device key in passphrase mode: the Linux
+/// kernel keyring of the user (`@u`), entry `smart-env:device-seed`, expiring
+/// after a time-to-live (ADR-002). Never written to disk.
+///
+/// Shared by all sessions and terminal tabs of the user until it expires or
+/// is deleted (`smart-env lock`). Outside Linux every call returns
+/// [`KeyError::SessionUnavailable`].
+pub struct KernelKeyringStore {
+    _description: String,
+    _ttl: std::time::Duration,
+}
+
+impl KernelKeyringStore {
+    /// Store for `smart-env:device-seed`, expiring `ttl` after each save.
+    pub fn new(ttl: std::time::Duration) -> Self {
+        Self::named("smart-env:device-seed", ttl)
+    }
+
+    /// Store under another entry name (tests, so they never touch the real
+    /// unlocked key).
+    pub fn named(description: &str, ttl: std::time::Duration) -> Self {
+        Self {
+            _description: description.to_owned(),
+            _ttl: ttl,
+        }
+    }
+}
+
+impl KeyStore for KernelKeyringStore {
+    fn load(&self) -> Result<Option<DeviceKey>, KeyError> {
+        todo!()
+    }
+
+    fn save(&self, _key: &DeviceKey) -> Result<(), KeyError> {
+        todo!()
+    }
+
+    fn delete(&self) -> Result<(), KeyError> {
+        todo!()
+    }
+}
+
 /// Fallback [`KeyStore`] for machines without a keychain (headless Linux, SSH):
 /// the key is kept in a file encrypted with a passphrase (`age` scrypt).
 pub struct PassphraseFileStore {

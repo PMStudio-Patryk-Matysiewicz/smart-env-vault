@@ -31,7 +31,7 @@ pub use secret::{
     Aad, EncryptedValue, FORMAT_VERSION, MAX_NAME_LEN, MAX_VALUE_LEN, SecretError, SecretValue,
     VarName,
 };
-pub use store::{KeyStore, KeychainStore, MemoryStore, PassphraseFileStore};
+pub use store::{KernelKeyringStore, KeyStore, KeychainStore, MemoryStore, PassphraseFileStore};
 pub use vault::{
     EnvKind, HISTORY_LIMIT, Inject, Member, Recipient, RecipientKind, Role, SecretMeta, SetOutcome,
     Vault, VaultError, VersionMeta,

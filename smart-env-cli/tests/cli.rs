@@ -17,9 +17,11 @@ fn smart_env(args: &[&str]) -> Output {
     let argv = std::iter::once("smart-env").chain(args.iter().copied());
     let dir = tempfile::TempDir::new().unwrap();
     let keys = MemoryStore::default();
+    let session = MemoryStore::default();
     let mut ctx = Context {
         data: Some(DataPaths::from_root(dir.path().join("smart-env"))),
         keys: &keys,
+        session: &session,
         account_label: "trawers".to_owned(),
         device_label: "laptop".to_owned(),
         terminal: None,

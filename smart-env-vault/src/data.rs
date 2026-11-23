@@ -81,6 +81,12 @@ impl DataPaths {
         &self.vault_db
     }
 
+    /// Passphrase-encrypted device key file; it exists only in passphrase
+    /// mode (no system keychain).
+    pub fn key_file(&self) -> &Path {
+        todo!()
+    }
+
     /// Local, device-specific state database path.
     pub fn state_db(&self) -> &Path {
         &self.state_db

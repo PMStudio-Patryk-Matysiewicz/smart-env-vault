@@ -19,6 +19,7 @@ toml_edit = "0.25"
 whoami = "2"
 secrecy = "0.10"
 zeroize = "1"
+rpassword = "7"
 
 [dev-dependencies]
 secrecy = "0.10"

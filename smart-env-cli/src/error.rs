@@ -118,10 +118,31 @@ impl From<VaultError> for CliError {
                 "Nie znaleziono odbiorcy klucza.".to_owned(),
                 doctor,
             ),
-            VaultError::AccountNotFound
-            | VaultError::NotAMember
-            | VaultError::AlreadyMember
-            | VaultError::DeviceNeedsAccount => todo!(),
+            VaultError::AccountNotFound => (
+                "account_not_found",
+                NotFound,
+                "Nie znaleziono konta.".to_owned(),
+                doctor,
+            ),
+            VaultError::AlreadyMember => (
+                "already_member",
+                Conflict,
+                "To konto już jest członkiem vaulta.".to_owned(),
+                "Nic nie trzeba robić",
+            ),
+            VaultError::NotAMember => (
+                "not_a_member",
+                Access,
+                "Konto nie jest członkiem tego vaulta, więc jego urządzenie nie dostanie dostępu."
+                    .to_owned(),
+                "Najpierw dodaj konto do vaulta jako członka",
+            ),
+            VaultError::DeviceNeedsAccount => (
+                "device_needs_account",
+                Failure,
+                "Urządzenie musi należeć do konta.".to_owned(),
+                doctor,
+            ),
             VaultError::NothingToUndo => (
                 "nothing_to_undo",
                 NotFound,

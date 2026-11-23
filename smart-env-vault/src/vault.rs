@@ -179,6 +179,27 @@ pub enum Role {
     Member,
 }
 
+impl Role {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Admin => "admin",
+            Self::Member => "member",
+        }
+    }
+}
+
+impl FromSql for Role {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        match value.as_str()? {
+            "owner" => Ok(Self::Owner),
+            "admin" => Ok(Self::Admin),
+            "member" => Ok(Self::Member),
+            _ => Err(FromSqlError::InvalidType),
+        }
+    }
+}
+
 /// An account that is a member of the vault, returned by [`Vault::members`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Member {
@@ -398,21 +419,60 @@ impl Vault {
 
     /// Creates an account (a person). It has no access to anything until
     /// [`Vault::add_member`].
-    pub fn create_account(&mut self, _label: &str) -> Result<AccountId, VaultError> {
-        todo!()
+    pub fn create_account(&mut self, label: &str) -> Result<AccountId, VaultError> {
+        let id = AccountId::new();
+        self.conn.execute(
+            "INSERT INTO accounts (id, label) VALUES (?1, ?2)",
+            params![id, label],
+        )?;
+        Ok(id)
     }
 
     /// Makes an account a member of this vault with a role.
     ///
     /// # Errors
     /// [`VaultError::AccountNotFound`], [`VaultError::AlreadyMember`].
-    pub fn add_member(&mut self, _account: AccountId, _role: Role) -> Result<(), VaultError> {
-        todo!()
+    pub fn add_member(&mut self, account: AccountId, role: Role) -> Result<(), VaultError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if member_role(&tx, self.id, account)?.is_some() {
+            return Err(VaultError::AlreadyMember);
+        }
+        tx.execute(
+            "INSERT INTO members (vault_id, account_id, role) VALUES (?1, ?2, ?3)",
+            params![self.id, account, role.as_str()],
+        )
+        .map_err(|error| {
+            if sqlite_code(&error) == Some(ffi::SQLITE_CONSTRAINT_FOREIGNKEY) {
+                VaultError::AccountNotFound
+            } else {
+                error.into()
+            }
+        })?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Members of this vault, in the order they were added.
     pub fn members(&self) -> Result<Vec<Member>, VaultError> {
-        todo!()
+        let mut statement = self.conn.prepare(
+            "SELECT a.id, a.label, m.role
+               FROM members m
+               JOIN accounts a ON a.id = m.account_id
+              WHERE m.vault_id = ?1
+              ORDER BY m.rowid",
+        )?;
+        let members = statement
+            .query_map([self.id], |row| {
+                Ok(Member {
+                    account: row.get(0)?,
+                    label: row.get(1)?,
+                    role: row.get(2)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(members)
     }
 
     /// Adds a device of a member account; like [`Vault::add_recipient`] it
@@ -424,12 +484,12 @@ impl Vault {
     /// [`VaultError::RecipientKeyTaken`].
     pub fn add_device(
         &mut self,
-        _account: AccountId,
-        _label: &str,
-        _public_key: &PublicKey,
-        _key: &impl Unwrapper,
+        account: AccountId,
+        label: &str,
+        public_key: &PublicKey,
+        key: &impl Unwrapper,
     ) -> Result<RecipientId, VaultError> {
-        todo!()
+        self.insert_recipient(RecipientKind::Device, Some(account), label, public_key, key)
     }
 
     /// Adds a recipient and wraps every existing DEK version of every
@@ -443,7 +503,8 @@ impl Vault {
     /// # Errors
     /// [`VaultError::Key`] (`Unwrap`) if `key` cannot open some DEK —
     /// nothing is written; [`VaultError::RecipientKeyTaken`] if this public
-    /// key is already a recipient.
+    /// key is already a recipient; [`VaultError::DeviceNeedsAccount`] for
+    /// [`RecipientKind::Device`] (use [`Vault::add_device`]).
     pub fn add_recipient(
         &mut self,
         kind: RecipientKind,
@@ -451,14 +512,46 @@ impl Vault {
         public_key: &PublicKey,
         key: &impl Unwrapper,
     ) -> Result<RecipientId, VaultError> {
+        if kind == RecipientKind::Device {
+            return Err(VaultError::DeviceNeedsAccount);
+        }
+        self.insert_recipient(kind, None, label, public_key, key)
+    }
+
+    /// Inserts a recipient and wraps every existing DEK version for it, in
+    /// one transaction. A device's account must be a member of this vault.
+    fn insert_recipient(
+        &mut self,
+        kind: RecipientKind,
+        account: Option<AccountId>,
+        label: &str,
+        public_key: &PublicKey,
+        key: &impl Unwrapper,
+    ) -> Result<RecipientId, VaultError> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(account) = account {
+            let exists = tx
+                .query_row(
+                    "SELECT 1 FROM accounts WHERE id = ?1",
+                    [account],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !exists {
+                return Err(VaultError::AccountNotFound);
+            }
+            if member_role(&tx, self.id, account)?.is_none() {
+                return Err(VaultError::NotAMember);
+            }
+        }
         let id = RecipientId::new();
         tx.execute(
-            "INSERT INTO recipients (id, vault_id, kind, label, public_key)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, self.id, kind.as_str(), label, public_key],
+            "INSERT INTO recipients (id, vault_id, kind, account_id, label, public_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, self.id, kind.as_str(), account, label, public_key],
         )
         .map_err(|error| unique_as(error, VaultError::RecipientKeyTaken))?;
 
@@ -1136,18 +1229,34 @@ fn store_wrap(
     Ok(())
 }
 
+/// Role of `account` in `vault`, `None` if it is not a member.
+fn member_role(
+    conn: &Connection,
+    vault: VaultId,
+    account: AccountId,
+) -> Result<Option<Role>, VaultError> {
+    Ok(conn
+        .query_row(
+            "SELECT role FROM members WHERE vault_id = ?1 AND account_id = ?2",
+            params![vault, account],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
 fn recipient_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Recipient> {
     Ok(Recipient {
         id: row.get(0)?,
         kind: row.get(1)?,
-        account: None, // red phase: not read yet
+        account: row.get(5)?,
         label: row.get(2)?,
         public_key: row.get(3)?,
         revoked: row.get(4)?,
     })
 }
 
-const RECIPIENT_COLUMNS: &str = "r.id, r.kind, r.label, r.public_key, r.revoked_at IS NOT NULL";
+const RECIPIENT_COLUMNS: &str =
+    "r.id, r.kind, r.label, r.public_key, r.revoked_at IS NOT NULL, r.account_id";
 
 /// Columns read by [`meta_from_row`], always first in the `SELECT`.
 const META_COLUMNS: &str = "name, key_id, version, inject, updated_at";

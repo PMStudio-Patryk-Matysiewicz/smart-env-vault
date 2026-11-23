@@ -13,8 +13,8 @@ pub struct IdParseError;
 macro_rules! id_type {
     ($(#[$doc:meta])* $name:ident) => {
         $(#[$doc])*
-        ///
-        /// Random UUID v4 generated on the client, stored as a 16-byte `BLOB`.
+        /// UUID v7 generated on the client (time-ordered, monotonic within the
+        /// process), stored as a 16-byte `BLOB`.
         /// Stable for the lifetime of the object and part of the [`Aad`](crate::Aad).
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         pub struct $name(uuid::Uuid);
@@ -22,7 +22,7 @@ macro_rules! id_type {
         impl $name {
             /// Generates a new random identifier (UUID v4).
             pub fn new() -> Self {
-                Self(uuid::Uuid::new_v4())
+                Self(uuid::Uuid::now_v7())
             }
 
             /// The 16 raw bytes, as used in the [`Aad`](crate::Aad) and the database.

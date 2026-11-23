@@ -62,10 +62,9 @@ pub(crate) fn run(
         ctx.keys.save(&device).map_err(key_error)?;
     }
     let state_existed = data.state_db().exists();
-    let labels = (
-        label(&ctx.account_label, "owner"),
-        label(&ctx.device_label, "device"),
-    );
+    let account_label = label(&ctx.account_label, "owner");
+    let device_label = device_label(&ctx.device_label, &account_label);
+    let labels = (account_label, device_label);
     if let Err(error) = create_vault(&data, &device, &recovery, &labels) {
         // Only what this run created; files that existed stay untouched.
         let _ = fs::remove_file(data.vault_db());
@@ -156,6 +155,24 @@ fn label(raw: &str, fallback: &str) -> String {
     match raw.trim() {
         "" => fallback.to_owned(),
         text => text.chars().take(MAX_LABEL).collect(),
+    }
+}
+
+/// Host name as the device label; a placeholder host name (empty,
+/// `localhost`, `localhost.localdomain`) becomes `<account>-<os>`, so lists
+/// of devices stay readable.
+fn device_label(host: &str, account_label: &str) -> String {
+    let host = host.trim();
+    let placeholder = host.is_empty()
+        || host.eq_ignore_ascii_case("localhost")
+        || host.eq_ignore_ascii_case("localhost.localdomain");
+    if placeholder {
+        label(
+            &format!("{account_label}-{}", std::env::consts::OS),
+            "device",
+        )
+    } else {
+        label(host, "device")
     }
 }
 

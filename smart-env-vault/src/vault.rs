@@ -1,6 +1,6 @@
 use crate::{
-    Aad, Dek, EncryptedValue, EnvironmentId, FORMAT_VERSION, KeyError, KeyId, ProjectId, PublicKey,
-    RecipientId, SecretError, SecretValue, Unwrapper, VarName, VaultId, WrappedDek,
+    Aad, AccountId, Dek, EncryptedValue, EnvironmentId, FORMAT_VERSION, KeyError, KeyId, ProjectId,
+    PublicKey, RecipientId, SecretError, SecretValue, Unwrapper, VarName, VaultId, WrappedDek,
 };
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, ffi, params};
@@ -32,6 +32,19 @@ pub enum VaultError {
     /// No recipient with this id.
     #[error("recipient not found")]
     RecipientNotFound,
+    /// No account with this id.
+    #[error("account not found")]
+    AccountNotFound,
+    /// The account is not a member of this vault, so its devices get no DEK.
+    #[error("account is not a member of this vault")]
+    NotAMember,
+    /// The account is already a member of this vault.
+    #[error("account is already a member of this vault")]
+    AlreadyMember,
+    /// [`Vault::add_recipient`] got [`RecipientKind::Device`]; devices are
+    /// added with [`Vault::add_device`], which ties them to an account.
+    #[error("a device must belong to an account")]
+    DeviceNeedsAccount,
     /// A project with this name already exists in the vault.
     #[error("project name already taken")]
     ProjectNameTaken,
@@ -154,6 +167,29 @@ impl FromSql for RecipientKind {
     }
 }
 
+/// Role of an account in a vault (F04). Stored from stage 1, enforced from
+/// stage 2 (ADR-012).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// Owns the vault: recovery key, policies, deleting the vault.
+    Owner,
+    /// Manages members, environments, tokens and rotation.
+    Admin,
+    /// Works with the environments it has access to.
+    Member,
+}
+
+/// An account that is a member of the vault, returned by [`Vault::members`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Member {
+    /// The account.
+    pub account: AccountId,
+    /// Account label, e.g. the system user name.
+    pub label: String,
+    /// Role in this vault.
+    pub role: Role,
+}
+
 /// A public key the vault wraps environment DEKs for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Recipient {
@@ -161,6 +197,8 @@ pub struct Recipient {
     pub id: RecipientId,
     /// Device, recovery key or machine.
     pub kind: RecipientKind,
+    /// Owner of a device; `None` for the recovery key and machines.
+    pub account: Option<AccountId>,
     /// Human label, e.g. `laptop Oli`.
     pub label: String,
     /// The key DEKs are wrapped for.
@@ -356,6 +394,42 @@ impl Vault {
                 |row| row.get(0),
             )
             .optional()?)
+    }
+
+    /// Creates an account (a person). It has no access to anything until
+    /// [`Vault::add_member`].
+    pub fn create_account(&mut self, _label: &str) -> Result<AccountId, VaultError> {
+        todo!()
+    }
+
+    /// Makes an account a member of this vault with a role.
+    ///
+    /// # Errors
+    /// [`VaultError::AccountNotFound`], [`VaultError::AlreadyMember`].
+    pub fn add_member(&mut self, _account: AccountId, _role: Role) -> Result<(), VaultError> {
+        todo!()
+    }
+
+    /// Members of this vault, in the order they were added.
+    pub fn members(&self) -> Result<Vec<Member>, VaultError> {
+        todo!()
+    }
+
+    /// Adds a device of a member account; like [`Vault::add_recipient`] it
+    /// wraps every existing DEK for it in one transaction.
+    ///
+    /// # Errors
+    /// [`VaultError::AccountNotFound`], [`VaultError::NotAMember`] (nothing
+    /// is written), [`VaultError::Key`] (`Unwrap`),
+    /// [`VaultError::RecipientKeyTaken`].
+    pub fn add_device(
+        &mut self,
+        _account: AccountId,
+        _label: &str,
+        _public_key: &PublicKey,
+        _key: &impl Unwrapper,
+    ) -> Result<RecipientId, VaultError> {
+        todo!()
     }
 
     /// Adds a recipient and wraps every existing DEK version of every
@@ -1066,6 +1140,7 @@ fn recipient_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Recipient> {
     Ok(Recipient {
         id: row.get(0)?,
         kind: row.get(1)?,
+        account: None, // red phase: not read yet
         label: row.get(2)?,
         public_key: row.get(3)?,
         revoked: row.get(4)?,

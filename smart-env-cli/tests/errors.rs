@@ -170,3 +170,27 @@ fn duplicate_name_should_be_named_in_message() {
 
     assert!(error.message().contains("API_KEY"));
 }
+
+#[test]
+fn account_errors_should_map_to_contract_exit_codes() {
+    let cases = [
+        (
+            VaultError::AccountNotFound,
+            "account_not_found",
+            Exit::NotFound,
+        ),
+        (VaultError::AlreadyMember, "already_member", Exit::Conflict),
+        (VaultError::NotAMember, "not_a_member", Exit::Access),
+        (
+            VaultError::DeviceNeedsAccount,
+            "device_needs_account",
+            Exit::Failure,
+        ),
+    ];
+
+    for (vault_error, code, exit) in cases {
+        let error = CliError::from(vault_error);
+        assert_eq!((error.code(), error.exit()), (code, exit));
+        assert!(error.hint().is_some(), "{code} should say how to fix it");
+    }
+}

@@ -7,6 +7,7 @@ const PROJECT: [u8; 16] = [2; 16];
 const ENV: [u8; 16] = [3; 16];
 const KEY: [u8; 16] = [4; 16];
 const RECIPIENT: [u8; 16] = [5; 16];
+const ACCOUNT: [u8; 16] = [6; 16];
 
 fn id(n: u8) -> [u8; 16] {
     [n; 16]
@@ -19,12 +20,18 @@ fn open() -> Connection {
     db
 }
 
-/// Vault with recipient "laptop" -> project "payments" -> env "dev" with active DEK v1
+/// Vault with owner account (member) and its device "laptop" -> project "payments" -> env "dev" with active DEK v1
 /// wrapped for the recipient -> secret DATABASE_URL.
 fn seeded() -> Connection {
     let db = open();
     db.execute("INSERT INTO vaults (id) VALUES (?1)", [VAULT])
         .unwrap();
+    db.execute(
+        "INSERT INTO accounts (id, label) VALUES (?1, 'trawers')",
+        [ACCOUNT],
+    )
+    .unwrap();
+    insert_member(&db, ACCOUNT, "owner").unwrap();
     insert_recipient(&db, RECIPIENT, "device", "age1laptop").unwrap();
     db.execute(
         "INSERT INTO projects (id, vault_id, name) VALUES (?1, ?2, 'payments')",
@@ -46,15 +53,35 @@ fn seeded() -> Connection {
     db
 }
 
+/// A device gets [`ACCOUNT`]; other kinds no account.
 fn insert_recipient(
     db: &Connection,
     id: [u8; 16],
     kind: &str,
     public_key: &str,
 ) -> rusqlite::Result<usize> {
+    let account = (kind == "device").then_some(ACCOUNT);
+    insert_recipient_with(db, id, kind, account, public_key)
+}
+
+fn insert_recipient_with(
+    db: &Connection,
+    id: [u8; 16],
+    kind: &str,
+    account: Option<[u8; 16]>,
+    public_key: &str,
+) -> rusqlite::Result<usize> {
     db.execute(
-        "INSERT INTO recipients (id, vault_id, kind, label, public_key) VALUES (?1, ?2, ?3, 'label', ?4)",
-        params![id, VAULT, kind, public_key],
+        "INSERT INTO recipients (id, vault_id, kind, account_id, label, public_key)
+         VALUES (?1, ?2, ?3, ?4, 'label', ?5)",
+        params![id, VAULT, kind, account, public_key],
+    )
+}
+
+fn insert_member(db: &Connection, account: [u8; 16], role: &str) -> rusqlite::Result<usize> {
+    db.execute(
+        "INSERT INTO members (vault_id, account_id, role) VALUES (?1, ?2, ?3)",
+        params![VAULT, account, role],
     )
 }
 
@@ -320,6 +347,7 @@ fn deleting_vault_cascades_to_everything() {
     db.execute("DELETE FROM vaults WHERE id = ?1", [VAULT])
         .unwrap();
     for table in [
+        "members",
         "projects",
         "recipients",
         "environments",
@@ -394,4 +422,86 @@ fn secret_inject_is_a_closed_set() {
         "UPDATE secrets SET inject = 'hook' WHERE key_id = ?1",
         [KEY],
     ));
+}
+
+// --- accounts (A7) ---
+
+#[test]
+fn device_must_belong_to_an_account() {
+    let db = seeded();
+    assert_constraint(insert_recipient_with(
+        &db,
+        id(9),
+        "device",
+        None,
+        "age1other",
+    ));
+}
+
+#[test]
+fn recovery_and_machine_have_no_account() {
+    let db = seeded();
+    for (n, kind) in [(9, "recovery"), (10, "machine")] {
+        assert_constraint(insert_recipient_with(
+            &db,
+            id(n),
+            kind,
+            Some(ACCOUNT),
+            &format!("age1{kind}"),
+        ));
+    }
+}
+
+#[test]
+fn device_account_must_exist() {
+    let db = seeded();
+    assert_constraint(insert_recipient_with(
+        &db,
+        id(9),
+        "device",
+        Some(id(9)),
+        "age1other",
+    ));
+}
+
+#[test]
+fn member_role_is_a_closed_set() {
+    let db = seeded();
+    for (n, role) in [(10, "admin"), (11, "member")] {
+        db.execute("INSERT INTO accounts (id, label) VALUES (?1, 'x')", [id(n)])
+            .unwrap();
+        insert_member(&db, id(n), role).unwrap();
+    }
+    db.execute(
+        "INSERT INTO accounts (id, label) VALUES (?1, 'x')",
+        [id(12)],
+    )
+    .unwrap();
+    assert_constraint(insert_member(&db, id(12), "trusted"));
+}
+
+#[test]
+fn account_is_member_of_a_vault_once() {
+    let db = seeded();
+    assert_constraint(insert_member(&db, ACCOUNT, "admin"));
+}
+
+#[test]
+fn member_needs_existing_account() {
+    let db = seeded();
+    assert_constraint(insert_member(&db, id(9), "member"));
+}
+
+#[test]
+fn account_label_length_is_checked() {
+    let db = seeded();
+    assert_constraint(db.execute("INSERT INTO accounts (id, label) VALUES (?1, '')", [id(9)]));
+}
+
+#[test]
+fn deleting_vault_keeps_accounts() {
+    let db = seeded();
+    db.execute("DELETE FROM vaults WHERE id = ?1", [VAULT])
+        .unwrap();
+    assert_eq!(count(&db, "accounts"), 1);
 }

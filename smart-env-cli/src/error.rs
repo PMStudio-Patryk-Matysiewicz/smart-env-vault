@@ -118,6 +118,10 @@ impl From<VaultError> for CliError {
                 "Nie znaleziono odbiorcy klucza.".to_owned(),
                 doctor,
             ),
+            VaultError::AccountNotFound
+            | VaultError::NotAMember
+            | VaultError::AlreadyMember
+            | VaultError::DeviceNeedsAccount => todo!(),
             VaultError::NothingToUndo => (
                 "nothing_to_undo",
                 NotFound,

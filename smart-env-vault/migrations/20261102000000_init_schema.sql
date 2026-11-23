@@ -25,14 +25,34 @@ CREATE TABLE environments (
     UNIQUE (project_id, name)
 ) STRICT;
 
+-- A person. Spans vaults (no vault_id); membership is in `members` (ADR-012).
+CREATE TABLE accounts (
+    id         BLOB NOT NULL PRIMARY KEY CHECK (length(id) = 16),
+    label      TEXT NOT NULL CHECK (length(label) BETWEEN 1 AND 128),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+) STRICT;
+
+-- Roles are stored from stage 1 and enforced from stage 2 (F04).
+CREATE TABLE members (
+    vault_id   BLOB NOT NULL REFERENCES vaults(id) ON DELETE CASCADE,
+    account_id BLOB NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    role       TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (vault_id, account_id)
+) STRICT;
+
+-- A device always belongs to an account; the recovery key and machine
+-- identities never do.
 CREATE TABLE recipients (
     id         BLOB NOT NULL PRIMARY KEY CHECK (length(id) = 16),
     vault_id   BLOB NOT NULL REFERENCES vaults(id) ON DELETE CASCADE,
     kind       TEXT NOT NULL CHECK (kind IN ('device', 'recovery', 'machine')),
+    account_id BLOB REFERENCES accounts(id),
     label      TEXT NOT NULL CHECK (length(label) BETWEEN 1 AND 128),
     public_key TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    revoked_at TEXT
+    revoked_at TEXT,
+    CHECK ((kind = 'device') = (account_id IS NOT NULL))
 ) STRICT;
 
 CREATE TABLE environment_deks (

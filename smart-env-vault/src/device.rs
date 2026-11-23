@@ -4,13 +4,35 @@ use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, 
 use secrecy::{ExposeSecret, SecretString};
 use std::str::FromStr;
 
-/// Private X25519 key of this device (`age` identity).
+/// Private keys of this device, derived from one 32-byte seed (ADR-002):
 ///
-/// Generated locally and kept in the system keychain (see [`KeyStore`](crate::KeyStore));
-/// the private part never leaves the device. Opens [`WrappedDek`](crate::WrappedDek)s
-/// via [`Unwrapper`](crate::Unwrapper). `Debug` shows only the public part.
+/// - X25519 (`age` identity) — opens [`WrappedDek`](crate::WrappedDek)s via
+///   [`Unwrapper`](crate::Unwrapper),
+/// - Ed25519 — signs requests and attestations (stage 2, ADR-009).
+///
+/// Each is HKDF-SHA256 of the seed with its own label
+/// (`smart-env/device/x25519`, `smart-env/device/ed25519`). Generated locally
+/// and kept in the system keychain (see [`KeyStore`](crate::KeyStore)); the
+/// seed never leaves the device. `Debug` shows only the public part.
 #[derive(Clone)]
 pub struct DeviceKey(x25519::Identity);
+
+/// Public Ed25519 key of a [`DeviceKey`]: verifies its signatures. Not secret.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SigningPublicKey([u8; 32]);
+
+impl SigningPublicKey {
+    /// The 32 raw bytes (RFC 8032 encoding).
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Whether `signature` is a valid Ed25519 signature of `message` by
+    /// this key.
+    pub fn verify(&self, _message: &[u8], _signature: &[u8; 64]) -> bool {
+        todo!()
+    }
+}
 
 /// Public half of a [`DeviceKey`] or [`RecoveryKey`](crate::RecoveryKey) (`age1...`).
 ///
@@ -30,7 +52,14 @@ impl DeviceKey {
         Self(x25519::Identity::generate())
     }
 
-    /// Restores a key from its text form (`AGE-SECRET-KEY-1...`), e.g. read from the keychain.
+    /// Derives the device keys from a seed. Deterministic: the same seed
+    /// always gives the same keys.
+    pub fn from_seed(_seed: [u8; 32]) -> Self {
+        todo!()
+    }
+
+    /// Restores a key from its text form
+    /// (`se-device-seed-v1:` + 64 lowercase hex digits), e.g. read from the keychain.
     ///
     /// # Errors
     /// [`KeyError::InvalidDeviceKey`] if the text is not a valid key.
@@ -40,7 +69,8 @@ impl DeviceKey {
             .map_err(|_| KeyError::InvalidDeviceKey)
     }
 
-    /// Text form of the private key, for saving in a [`KeyStore`](crate::KeyStore).
+    /// Text form of the seed (`se-device-seed-v1:<hex>`), for saving in a
+    /// [`KeyStore`](crate::KeyStore).
     /// Wrapped in [`SecretString`], so it is wiped on drop and hidden in `Debug`.
     pub fn to_secret(&self) -> SecretString {
         self.0.to_string()
@@ -49,6 +79,16 @@ impl DeviceKey {
     /// The public key to wrap DEKs for this device.
     pub fn public(&self) -> PublicKey {
         PublicKey(self.0.to_public())
+    }
+
+    /// The public key that verifies this device's signatures.
+    pub fn signing_public(&self) -> SigningPublicKey {
+        todo!()
+    }
+
+    /// Ed25519 signature of `message` (RFC 8032, deterministic).
+    pub fn sign(&self, _message: &[u8]) -> [u8; 64] {
+        todo!()
     }
 }
 

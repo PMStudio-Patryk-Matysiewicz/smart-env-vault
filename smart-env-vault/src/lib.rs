@@ -23,9 +23,9 @@ mod vault;
 
 pub use data::{DataPaths, DataPathsError, StateStore};
 pub use dek::{Dek, Unwrapper, WrappedDek};
-pub use device::{DeviceKey, PublicKey};
+pub use device::{DeviceKey, PublicKey, SigningPublicKey};
 pub use error::KeyError;
-pub use ids::{EnvironmentId, IdParseError, KeyId, ProjectId, RecipientId, VaultId};
+pub use ids::{AccountId, EnvironmentId, IdParseError, KeyId, ProjectId, RecipientId, VaultId};
 pub use recovery::RecoveryKey;
 pub use secret::{
     Aad, EncryptedValue, FORMAT_VERSION, MAX_NAME_LEN, MAX_VALUE_LEN, SecretError, SecretValue,
@@ -33,6 +33,6 @@ pub use secret::{
 };
 pub use store::{KeyStore, KeychainStore, MemoryStore, PassphraseFileStore};
 pub use vault::{
-    EnvKind, HISTORY_LIMIT, Inject, Recipient, RecipientKind, SecretMeta, SetOutcome, Vault,
-    VaultError, VersionMeta,
+    EnvKind, HISTORY_LIMIT, Inject, Member, Recipient, RecipientKind, Role, SecretMeta, SetOutcome,
+    Vault, VaultError, VersionMeta,
 };

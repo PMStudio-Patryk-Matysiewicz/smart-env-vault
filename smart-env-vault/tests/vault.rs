@@ -1,8 +1,8 @@
 use rusqlite::{Connection, params};
 use smart_env_vault::{
-    Dek, DeviceKey, EnvKind, EnvironmentId, HISTORY_LIMIT, Inject, KeyError, ProjectId, PublicKey,
-    Recipient, RecipientId, RecipientKind, RecoveryKey, SecretError, SecretValue, SetOutcome,
-    Unwrapper, VarName, Vault, VaultError, WrappedDek,
+    AccountId, Dek, DeviceKey, EnvKind, EnvironmentId, HISTORY_LIMIT, Inject, KeyError, Member,
+    ProjectId, PublicKey, Recipient, RecipientId, RecipientKind, RecoveryKey, Role, SecretError,
+    SecretValue, SetOutcome, Unwrapper, VarName, Vault, VaultError, WrappedDek,
 };
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -15,19 +15,23 @@ struct Fixture {
     env: EnvironmentId,
     device: DeviceKey,
     recovery: RecoveryKey,
+    account: AccountId,
     device_id: RecipientId,
     recovery_id: RecipientId,
 }
 
-/// Vault with recipients "laptop" (device) and "recovery", project "payments" and environment "dev".
+/// Vault with owner account "trawers", its device "laptop", recipient
+/// "recovery", project "payments" and environment "dev".
 fn setup() -> Fixture {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("vault.db");
     let device = DeviceKey::generate();
     let (recovery, _) = RecoveryKey::generate();
     let mut vault = Vault::create(&path).unwrap();
+    let account = vault.create_account("trawers").unwrap();
+    vault.add_member(account, Role::Owner).unwrap();
     let device_id = vault
-        .add_recipient(RecipientKind::Device, "laptop", &device.public(), &device)
+        .add_device(account, "laptop", &device.public(), &device)
         .unwrap();
     let recovery_id = vault
         .add_recipient(
@@ -49,6 +53,7 @@ fn setup() -> Fixture {
         env,
         device,
         recovery,
+        account,
         device_id,
         recovery_id,
     }
@@ -880,7 +885,7 @@ fn add_recipient_with_foreign_key_changes_nothing() {
     let intruder = DeviceKey::generate();
 
     let result = f.vault.add_recipient(
-        RecipientKind::Device,
+        RecipientKind::Machine,
         "intruder",
         &intruder.public(),
         &intruder,
@@ -900,8 +905,10 @@ fn environment_needs_an_active_recipient() {
     assert!(matches!(err(no_recipients), VaultError::NoRecipients));
 
     let device = DeviceKey::generate();
+    let account = vault.create_account("trawers").unwrap();
+    vault.add_member(account, Role::Owner).unwrap();
     let id = vault
-        .add_recipient(RecipientKind::Device, "laptop", &device.public(), &device)
+        .add_device(account, "laptop", &device.public(), &device)
         .unwrap();
     vault.revoke_recipient(id).unwrap();
     let only_revoked = vault.create_environment(project, "dev", EnvKind::Dev);
@@ -1200,4 +1207,187 @@ fn unknown_environment_is_reported_by_every_operation() {
         &entries(&[("A", "a")]),
         &f.device
     ))));
+}
+
+// --- accounts and members (A7) ---
+
+fn recipient_rows(path: &Path) -> i64 {
+    raw(path)
+        .query_row("SELECT count(*) FROM recipients", [], |row| row.get(0))
+        .unwrap()
+}
+
+#[test]
+fn members_lists_owner_with_label_and_role() {
+    let f = setup();
+    assert_eq!(
+        f.vault.members().unwrap(),
+        [Member {
+            account: f.account,
+            label: "trawers".to_owned(),
+            role: Role::Owner
+        }]
+    );
+}
+
+#[test]
+fn members_are_listed_in_order_added() {
+    let mut f = setup();
+    let ola = f.vault.create_account("ola").unwrap();
+    let jan = f.vault.create_account("jan").unwrap();
+    f.vault.add_member(ola, Role::Admin).unwrap();
+    f.vault.add_member(jan, Role::Member).unwrap();
+
+    let members: Vec<(String, Role)> = f
+        .vault
+        .members()
+        .unwrap()
+        .into_iter()
+        .map(|m| (m.label, m.role))
+        .collect();
+    assert_eq!(
+        members,
+        [
+            ("trawers".to_owned(), Role::Owner),
+            ("ola".to_owned(), Role::Admin),
+            ("jan".to_owned(), Role::Member),
+        ]
+    );
+}
+
+#[test]
+fn account_without_membership_is_not_listed() {
+    let mut f = setup();
+    f.vault.create_account("ola").unwrap();
+    assert_eq!(f.vault.members().unwrap().len(), 1);
+}
+
+#[test]
+fn adding_member_twice_is_already_member() {
+    let mut f = setup();
+    assert!(matches!(
+        err(f.vault.add_member(f.account, Role::Admin)),
+        VaultError::AlreadyMember
+    ));
+    assert_eq!(f.vault.members().unwrap()[0].role, Role::Owner);
+}
+
+#[test]
+fn adding_unknown_account_as_member_is_not_found() {
+    let mut f = setup();
+    assert!(matches!(
+        err(f.vault.add_member(AccountId::new(), Role::Member)),
+        VaultError::AccountNotFound
+    ));
+}
+
+#[test]
+fn device_of_unknown_account_is_not_found() {
+    let mut f = setup();
+    let device = DeviceKey::generate();
+    let result = f
+        .vault
+        .add_device(AccountId::new(), "phone", &device.public(), &f.device);
+    assert!(matches!(err(result), VaultError::AccountNotFound));
+}
+
+#[test]
+fn device_of_non_member_gets_nothing() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    let stranger = f.vault.create_account("stranger").unwrap();
+    let device = DeviceKey::generate();
+    let (recipients, wraps) = (recipient_rows(&f.path), wrap_rows(&f.path));
+
+    let result = f
+        .vault
+        .add_device(stranger, "laptop", &device.public(), &f.device);
+
+    assert!(matches!(err(result), VaultError::NotAMember));
+    assert_eq!(recipient_rows(&f.path), recipients);
+    assert_eq!(wrap_rows(&f.path), wraps);
+    assert!(matches!(
+        err(f.vault.get(f.env, &name("A"), &device)),
+        VaultError::Key(KeyError::Unwrap)
+    ));
+}
+
+#[test]
+fn add_recipient_refuses_device_kind() {
+    let mut f = setup();
+    let device = DeviceKey::generate();
+    let result = f
+        .vault
+        .add_recipient(RecipientKind::Device, "phone", &device.public(), &f.device);
+    assert!(matches!(err(result), VaultError::DeviceNeedsAccount));
+    assert_eq!(f.vault.recipients().unwrap().len(), 2);
+}
+
+#[test]
+fn recipients_report_device_account() {
+    let f = setup();
+    let accounts: Vec<(RecipientKind, Option<AccountId>)> = f
+        .vault
+        .recipients()
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.kind, r.account))
+        .collect();
+    assert_eq!(
+        accounts,
+        [
+            (RecipientKind::Device, Some(f.account)),
+            (RecipientKind::Recovery, None),
+        ]
+    );
+}
+
+#[test]
+fn second_device_of_account_reads_existing_environment() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    let phone = DeviceKey::generate();
+
+    f.vault
+        .add_device(f.account, "phone", &phone.public(), &f.device)
+        .unwrap();
+
+    let back = f.vault.get(f.env, &name("A"), &phone).unwrap();
+    assert_eq!(back.unwrap().expose(), "a");
+}
+
+#[test]
+fn revoking_one_device_keeps_the_other() {
+    let mut f = setup();
+    let phone = DeviceKey::generate();
+    let phone_id = f
+        .vault
+        .add_device(f.account, "phone", &phone.public(), &f.device)
+        .unwrap();
+
+    f.vault.revoke_recipient(phone_id).unwrap();
+    let staging = f
+        .vault
+        .create_environment(f.project, "staging", EnvKind::Staging)
+        .unwrap();
+
+    assert_eq!(
+        labels(f.vault.environment_recipients(staging).unwrap()),
+        ["laptop", "recovery"]
+    );
+}
+
+#[test]
+fn add_device_with_foreign_key_changes_nothing() {
+    let mut f = setup();
+    let intruder = DeviceKey::generate();
+    let (recipients, wraps) = (recipient_rows(&f.path), wrap_rows(&f.path));
+
+    let result = f
+        .vault
+        .add_device(f.account, "intruder", &intruder.public(), &intruder);
+
+    assert!(matches!(err(result), VaultError::Key(KeyError::Unwrap)));
+    assert_eq!(recipient_rows(&f.path), recipients);
+    assert_eq!(wrap_rows(&f.path), wraps);
 }

@@ -99,11 +99,31 @@ id_type!(
     /// Identifier of a vault recipient: a device, the recovery key or a machine key.
     RecipientId
 );
+id_type!(
+    /// Identifier of an account (a person). Spans vaults; owns devices.
+    AccountId
+);
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    #[test]
+    fn new_ids_are_uuid_v7() {
+        let bytes = *KeyId::new().as_bytes();
+        assert_eq!(bytes[6] >> 4, 7, "version nibble");
+        assert_eq!(bytes[8] >> 6, 0b10, "RFC 9562 variant");
+    }
+
+    #[test]
+    fn ids_sort_in_creation_order() {
+        let ids: Vec<[u8; 16]> = (0..1000).map(|_| *KeyId::new().as_bytes()).collect();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(ids, sorted);
+    }
 
     #[test]
     fn ids_are_unique() {

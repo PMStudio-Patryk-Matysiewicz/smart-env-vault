@@ -510,3 +510,45 @@ fn empty_user_name_becomes_owner_and_long_host_name_is_cut() {
     assert_eq!(vault.members().unwrap()[0].label, "owner");
     assert_eq!(vault.recipients().unwrap()[0].label, "h".repeat(128));
 }
+
+// --- device label without a real host name ---
+
+/// Label of the device recipient after `setup` with these names.
+fn device_label_for(account: &str, host: &str) -> String {
+    let mut machine = Machine::new();
+    machine.account_label = account.to_owned();
+    machine.device_label = host.to_owned();
+    let (run, _) = machine.setup();
+    assert_eq!(run.exit, Exit::Success, "stderr: {}", run.stderr);
+    machine.vault().recipients().unwrap()[0].label.clone()
+}
+
+#[test]
+fn placeholder_host_names_become_user_and_os() {
+    let expected = format!("trawers-{}", std::env::consts::OS);
+    for host in [
+        "localhost",
+        "localhost.localdomain",
+        "LOCALHOST.LocalDomain",
+        " localhost ",
+        "",
+        "   ",
+    ] {
+        assert_eq!(device_label_for("trawers", host), expected, "{host:?}");
+    }
+}
+
+#[test]
+fn placeholder_host_without_user_name_uses_owner() {
+    assert_eq!(
+        device_label_for("", "localhost"),
+        format!("owner-{}", std::env::consts::OS)
+    );
+}
+
+#[test]
+fn real_host_names_are_kept() {
+    for host in ["laptop", "localhost-dev", "my.localdomain", "build-01"] {
+        assert_eq!(device_label_for("trawers", host), host, "{host:?}");
+    }
+}

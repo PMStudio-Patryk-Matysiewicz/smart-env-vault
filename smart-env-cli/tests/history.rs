@@ -126,8 +126,13 @@ fn history_lists_versions_newest_first_without_values() {
     assert_eq!(lines[0], "API_KEY in payments/dev");
     assert_eq!(listed_versions(&run.stdout), [3, 2, 1]);
     assert!(lines[1].starts_with("  3  "), "{}", run.stdout);
-    assert!(lines[1].ends_with("UTC  (current)"), "{}", run.stdout);
-    assert!(lines[2].ends_with(" UTC"), "{}", run.stdout);
+    assert!(
+        lines[1].ends_with(" UTC  set     (current)"),
+        "{}",
+        run.stdout
+    );
+    assert!(lines[2].ends_with(" UTC  set"), "{}", run.stdout);
+    assert!(lines[3].ends_with(" UTC  import"), "{}", run.stdout);
     assert!(
         is_timestamp(&lines[2]["  2  ".len()..][..19]),
         "{}",
@@ -246,6 +251,9 @@ fn history_json_lists_versions_without_values() {
     assert_eq!(versions[0]["current"], true);
     assert_eq!(versions[1]["version"], 1);
     assert_eq!(versions[1]["current"], false);
+    assert_eq!(versions[0]["operation"], "set");
+    assert!(versions[0]["restored_version"].is_null());
+    assert_eq!(versions[1]["operation"], "import");
     for version in versions {
         assert!(
             is_timestamp(version["created_at"].as_str().unwrap()),
@@ -254,6 +262,54 @@ fn history_json_lists_versions_without_values() {
         assert!(version.get("value").is_none(), "{version}");
     }
     assert_no_secret(&run);
+}
+
+#[test]
+fn history_shows_what_wrote_each_version() {
+    let m = project();
+    set(&m, "API_KEY", "v2-hunter2");
+    ok(m.run(&["undo", "API_KEY"], None));
+    set(&m, "API_KEY", "v4-hunter2");
+    let run = ok(m.run(&["history", "API_KEY"], None));
+
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(listed_versions(&run.stdout), [4, 3, 2, 1]);
+    assert!(
+        lines[1].ends_with(" UTC  set       (current)"),
+        "{}",
+        run.stdout
+    );
+    assert!(lines[2].ends_with(" UTC  undo → 1"), "{}", run.stdout);
+    assert!(lines[3].ends_with(" UTC  set"), "{}", run.stdout);
+    assert!(lines[4].ends_with(" UTC  import"), "{}", run.stdout);
+    assert_no_secret(&run);
+}
+
+#[test]
+fn history_json_reports_the_restored_version_of_an_undo() {
+    let m = project();
+    set(&m, "API_KEY", "v2");
+    ok(m.run(&["undo", "API_KEY"], None));
+    let run = ok(m.run(&["history", "API_KEY", "--json"], None));
+
+    let current = &json(&run.stdout)["versions"][0];
+    assert_eq!(current["version"], 3);
+    assert_eq!(current["operation"], "undo");
+    assert_eq!(current["restored_version"], 1);
+}
+
+#[test]
+fn history_after_rm_and_undo_is_unchanged() {
+    let m = project();
+    set(&m, "API_KEY", "v2");
+    let before = ok(m.run(&["history", "API_KEY", "--json"], None));
+    ok(m.run(&["rm", "API_KEY"], None));
+    ok(m.run(&["undo", "API_KEY"], None));
+    let after = ok(m.run(&["history", "API_KEY", "--json"], None));
+    assert_eq!(
+        json(&after.stdout)["versions"],
+        json(&before.stdout)["versions"]
+    );
 }
 
 // --- undo ---

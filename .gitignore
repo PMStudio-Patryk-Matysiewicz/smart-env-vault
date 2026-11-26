@@ -6,3 +6,5 @@ smart-env-vault-architecture
 !.env.example
 *.db
 *.db-*
+# Test fixtures: known seed, no real secrets
+!smart-env-vault/tests/fixtures/*.db

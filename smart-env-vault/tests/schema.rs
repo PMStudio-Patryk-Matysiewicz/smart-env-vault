@@ -505,3 +505,82 @@ fn deleting_vault_keeps_accounts() {
         .unwrap();
     assert_eq!(count(&db, "accounts"), 1);
 }
+
+// --- operation of a version ---
+
+#[test]
+fn new_rows_default_to_unknown_operation() {
+    let db = seeded();
+    insert_version(&db, 1).unwrap();
+    let current: String = db
+        .query_row(
+            "SELECT operation FROM secrets WHERE key_id = ?1",
+            [KEY],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let previous: String = db
+        .query_row(
+            "SELECT operation FROM secret_versions WHERE key_id = ?1",
+            [KEY],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        (current.as_str(), previous.as_str()),
+        ("unknown", "unknown")
+    );
+}
+
+#[test]
+fn operation_is_a_closed_set() {
+    let db = seeded();
+    insert_version(&db, 1).unwrap();
+    for operation in ["import", "set", "unknown"] {
+        db.execute(
+            "UPDATE secrets SET operation = ?2 WHERE key_id = ?1",
+            params![KEY, operation],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE secret_versions SET operation = ?2 WHERE key_id = ?1",
+            params![KEY, operation],
+        )
+        .unwrap();
+    }
+    assert_constraint(db.execute(
+        "UPDATE secrets SET operation = 'rm' WHERE key_id = ?1",
+        [KEY],
+    ));
+    assert_constraint(db.execute(
+        "UPDATE secret_versions SET operation = 'rm' WHERE key_id = ?1",
+        [KEY],
+    ));
+}
+
+#[test]
+fn only_undo_has_a_restored_version_and_undo_always_has_one() {
+    let db = seeded();
+    insert_version(&db, 1).unwrap();
+    for table in ["secrets", "secret_versions"] {
+        db.execute(
+            &format!(
+                "UPDATE {table} SET operation = 'undo', restored_version = 1 WHERE key_id = ?1"
+            ),
+            [KEY],
+        )
+        .unwrap();
+        assert_constraint(db.execute(
+            &format!("UPDATE {table} SET restored_version = NULL WHERE key_id = ?1"),
+            [KEY],
+        ));
+        assert_constraint(db.execute(
+            &format!("UPDATE {table} SET operation = 'set' WHERE key_id = ?1"),
+            [KEY],
+        ));
+        assert_constraint(db.execute(
+            &format!("UPDATE {table} SET restored_version = 0 WHERE key_id = ?1"),
+            [KEY],
+        ));
+    }
+}

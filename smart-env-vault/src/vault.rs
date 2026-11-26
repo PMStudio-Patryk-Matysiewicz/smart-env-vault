@@ -318,14 +318,34 @@ pub struct SetOutcome {
     pub version: u32,
 }
 
-/// One entry of [`Vault::history`]: a version and when it was written, never
-/// the value.
+/// What wrote a version of a value. Stored with the version and moved to
+/// the history with it; never says anything about the value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Operation {
+    /// Imported from a `.env` file ([`Vault::import_project`],
+    /// [`Vault::import`]).
+    Import,
+    /// Set by hand ([`Vault::set`], [`Vault::set_with`]).
+    Set,
+    /// Written by [`Vault::undo`] with the value of version `restored`.
+    Undo {
+        /// Version whose value was restored.
+        restored: u32,
+    },
+    /// Written before operations were recorded (schema version 1).
+    Unknown,
+}
+
+/// One entry of [`Vault::history`]: a version, when and how it was written,
+/// never the value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VersionMeta {
     /// Version number of the value.
     pub version: u32,
     /// When this version was written (UTC, `YYYY-MM-DD HH:MM:SS`).
     pub created_at: String,
+    /// What wrote this version.
+    pub operation: Operation,
 }
 
 /// A secret row together with everything needed to rebuild its AAD.
@@ -1056,11 +1076,13 @@ impl Vault {
             Ok(VersionMeta {
                 version: row.get(0)?,
                 created_at: row.get(1)?,
+                operation: Operation::Unknown, // red: not recorded yet
             })
         })?;
         std::iter::once(Ok(VersionMeta {
             version,
             created_at: updated_at,
+            operation: Operation::Unknown, // red: not recorded yet
         }))
         .chain(previous)
         .collect::<Result<_, _>>()

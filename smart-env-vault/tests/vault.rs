@@ -1,9 +1,9 @@
 use rusqlite::{Connection, params};
 use smart_env_vault::{
     AccountId, Dek, DeviceKey, EnvKind, EnvironmentId, EnvironmentInfo, HISTORY_LIMIT, Inject,
-    KeyError, Member, NewEnvironment, ProjectId, PublicKey, Recipient, RecipientId, RecipientKind,
-    RecoveryKey, Role, SecretError, SecretMeta, SecretValue, SetOutcome, Unwrapper, VarName, Vault,
-    VaultError, WrappedDek,
+    KeyError, Member, NewEnvironment, Operation, ProjectId, PublicKey, Recipient, RecipientId,
+    RecipientKind, RecoveryKey, Role, SecretError, SecretMeta, SecretValue, SetOutcome, Unwrapper,
+    VarName, Vault, VaultError, WrappedDek,
 };
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -1743,4 +1743,200 @@ fn import_project_without_recipients_writes_nothing() {
         VaultError::NoRecipients
     ));
     assert_eq!(vault.find_project("shop").unwrap(), None);
+}
+
+// --- operation of each version (history: what wrote it) -------------------------
+
+fn ops_in(vault: &Vault, env: EnvironmentId, var: &str) -> Vec<(u32, Operation)> {
+    vault
+        .history(env, &name(var))
+        .unwrap()
+        .into_iter()
+        .map(|meta| (meta.version, meta.operation))
+        .collect()
+}
+
+fn ops(f: &Fixture, var: &str) -> Vec<(u32, Operation)> {
+    ops_in(&f.vault, f.env, var)
+}
+
+#[test]
+fn set_records_set_for_every_version() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    put_with(&mut f, "A", "a2", Some(Inject::Run));
+    assert_eq!(ops(&f, "A"), [(2, Operation::Set), (1, Operation::Set)]);
+}
+
+#[test]
+fn import_project_records_import() {
+    let mut f = setup();
+    let dev = entries(&[("A", "1")]);
+    let (_, envs) = f
+        .vault
+        .import_project(
+            "shop",
+            &[NewEnvironment {
+                name: "dev",
+                kind: EnvKind::Dev,
+                entries: &dev,
+            }],
+        )
+        .unwrap();
+    assert_eq!(ops_in(&f.vault, envs[0], "A"), [(1, Operation::Import)]);
+}
+
+#[test]
+fn import_records_import_also_over_an_existing_value() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    f.vault
+        .import(f.env, &entries(&[("A", "a2"), ("B", "b1")]), &f.device)
+        .unwrap();
+    assert_eq!(ops(&f, "A"), [(2, Operation::Import), (1, Operation::Set)]);
+    assert_eq!(ops(&f, "B"), [(1, Operation::Import)]);
+}
+
+#[test]
+fn undo_records_the_restored_version() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    put(&mut f, "A", "a2");
+    f.vault.undo(f.env, &name("A"), &f.device).unwrap();
+    assert_eq!(
+        ops(&f, "A"),
+        [
+            (3, Operation::Undo { restored: 1 }),
+            (2, Operation::Set),
+            (1, Operation::Set),
+        ]
+    );
+
+    f.vault.undo(f.env, &name("A"), &f.device).unwrap();
+    assert_eq!(ops(&f, "A")[0], (4, Operation::Undo { restored: 2 }));
+}
+
+#[test]
+fn undo_of_a_removed_secret_adds_no_version() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    put(&mut f, "A", "a2");
+    f.vault.remove(f.env, &name("A")).unwrap();
+    f.vault.undo(f.env, &name("A"), &f.device).unwrap();
+    assert_eq!(ops(&f, "A"), [(2, Operation::Set), (1, Operation::Set)]);
+}
+
+#[test]
+fn operation_follows_a_renamed_secret() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    put(&mut f, "A", "a2");
+    f.vault.undo(f.env, &name("A"), &f.device).unwrap();
+    f.vault.rename(f.env, &name("A"), &name("B")).unwrap();
+    assert_eq!(ops(&f, "B")[0], (3, Operation::Undo { restored: 1 }));
+}
+
+// --- schema version 1 -> 2 (operations), upgraded on open ------------------------
+
+/// Vault written by schema version 1 (before operations were recorded):
+/// device key from seed `[7; 32]`, project `payments`, environment `dev`,
+/// `A` at version 2 (`a1`, `a2`), `B` (`b1`) removed.
+const VAULT_V1: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/vault-v1.db");
+
+fn v1_copy() -> (TempDir, PathBuf) {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("vault.db");
+    std::fs::copy(VAULT_V1, &path).unwrap();
+    (dir, path)
+}
+
+fn user_version(path: &Path) -> i64 {
+    raw(path)
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap()
+}
+
+fn v1_env(vault: &Vault) -> EnvironmentId {
+    let project = vault.find_project("payments").unwrap().unwrap();
+    vault.environments(project).unwrap()[0].id
+}
+
+#[test]
+fn new_vault_has_schema_version_2() {
+    let f = setup();
+    assert_eq!(user_version(&f.path), 2);
+}
+
+#[test]
+fn opening_a_v1_vault_upgrades_it_and_keeps_every_value() {
+    let (_dir, path) = v1_copy();
+    assert_eq!(user_version(&path), 1, "fixture is version 1");
+
+    let mut vault = Vault::open(&path).unwrap();
+    assert_eq!(user_version(&path), 2);
+
+    let env = v1_env(&vault);
+    let key = DeviceKey::from_seed([7; 32]);
+    assert_eq!(
+        ops_in(&vault, env, "A"),
+        [(2, Operation::Unknown), (1, Operation::Unknown)]
+    );
+    let a = vault.get(env, &name("A"), &key).unwrap().unwrap();
+    assert_eq!(a.expose(), "a2");
+
+    vault.undo(env, &name("B"), &key).unwrap();
+    let b = vault.get(env, &name("B"), &key).unwrap().unwrap();
+    assert_eq!(b.expose(), "b1");
+}
+
+#[test]
+fn upgraded_vault_records_operations_from_then_on() {
+    let (_dir, path) = v1_copy();
+    let mut vault = Vault::open(&path).unwrap();
+    let env = v1_env(&vault);
+    let key = DeviceKey::from_seed([7; 32]);
+
+    vault.set(env, &name("A"), &value("a3"), &key).unwrap();
+    vault.undo(env, &name("A"), &key).unwrap();
+    assert_eq!(
+        ops_in(&vault, env, "A"),
+        [
+            (4, Operation::Undo { restored: 3 }),
+            (3, Operation::Set),
+            (2, Operation::Unknown),
+            (1, Operation::Unknown),
+        ]
+    );
+    assert_eq!(
+        vault.get(env, &name("A"), &key).unwrap().unwrap().expose(),
+        "a3"
+    );
+
+    drop(vault);
+    let reopened = Vault::open(&path).unwrap();
+    assert_eq!(ops_in(&reopened, env, "A").len(), 4);
+}
+
+#[test]
+fn undo_onto_an_unknown_version_records_the_restored_version() {
+    let (_dir, path) = v1_copy();
+    let mut vault = Vault::open(&path).unwrap();
+    let env = v1_env(&vault);
+    let key = DeviceKey::from_seed([7; 32]);
+
+    vault.undo(env, &name("A"), &key).unwrap();
+    assert_eq!(
+        ops_in(&vault, env, "A")[0],
+        (3, Operation::Undo { restored: 1 })
+    );
+}
+
+#[test]
+fn unknown_future_schema_version_is_still_refused() {
+    let (_dir, path) = v1_copy();
+    raw(&path).pragma_update(None, "user_version", 3).unwrap();
+    assert!(matches!(
+        err(Vault::open(&path)),
+        VaultError::UnsupportedSchema
+    ));
 }

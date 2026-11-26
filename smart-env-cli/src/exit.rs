@@ -16,6 +16,9 @@ pub enum Exit {
     NotFound,
     /// `5`: conflict (name taken, changed in the meantime).
     Conflict,
+    /// Exit code of the command started by `run`; `126` / `127` when it
+    /// could not be started (not executable / not found), like a shell.
+    Child(u8),
 }
 
 impl Exit {
@@ -28,6 +31,7 @@ impl Exit {
             Self::Access => 3,
             Self::NotFound => 4,
             Self::Conflict => 5,
+            Self::Child(_) => todo!(),
         }
     }
 }

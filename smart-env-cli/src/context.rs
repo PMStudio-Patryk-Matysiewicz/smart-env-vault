@@ -3,11 +3,12 @@
 //! builds it from the system ([`System`]); tests build it from temporary
 //! directories and fakes.
 
+use std::ffi::OsString;
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use smart_env_vault::{DataPaths, KernelKeyringStore, KeyStore, KeychainStore};
 
 /// How long `unlock` keeps the device key in the kernel keyring (ADR-002).
@@ -33,6 +34,47 @@ pub trait Terminal {
     fn ask_secret(&mut self, question: &str) -> io::Result<SecretString>;
 }
 
+/// A command for `run` to start: program, arguments and the variables to add
+/// to the inherited environment (they override inherited ones).
+pub struct ChildCommand {
+    /// Program, looked up in `PATH` like a shell does.
+    pub program: OsString,
+    /// Arguments, passed verbatim.
+    pub args: Vec<OsString>,
+    /// Variables from the vault; values never become arguments.
+    pub env: Vec<(String, SecretString)>,
+}
+
+impl ChildCommand {
+    /// The [`std::process::Command`] that starts it, inheriting stdio and the
+    /// rest of the environment.
+    pub fn to_command(&self) -> std::process::Command {
+        let _ = self.env.first().map(|(_, value)| value.expose_secret());
+        todo!()
+    }
+}
+
+/// Starts the command of `run`.
+pub trait Runner {
+    /// Runs `command` and returns its exit code. The real runner replaces
+    /// the current process on Unix (`exec`), so it returns only on failure.
+    ///
+    /// # Errors
+    /// The command could not be started (`NotFound`, `PermissionDenied`, …).
+    fn run(&mut self, command: ChildCommand) -> io::Result<u8>;
+}
+
+/// Replaces the `smart-env` process with the command (Unix `exec`): its
+/// exit code and signals are the command's own, and decrypted values do not
+/// stay in a waiting `smart-env` process. Elsewhere: spawn and wait.
+pub struct ProcessRunner;
+
+impl Runner for ProcessRunner {
+    fn run(&mut self, _command: ChildCommand) -> io::Result<u8> {
+        todo!()
+    }
+}
+
 /// Everything a command may use besides its arguments.
 pub struct Context<'a> {
     /// Data directory (`vault.db`, `state.db`); `None` if the system did not
@@ -54,6 +96,8 @@ pub struct Context<'a> {
     pub terminal: Option<&'a mut dyn Terminal>,
     /// Standard input, read only on request (`set --stdin`).
     pub stdin: Box<dyn Read + 'a>,
+    /// Starts the command of `run`.
+    pub runner: Box<dyn Runner + 'a>,
 }
 
 /// Owns the real system resources a [`Context`] borrows.
@@ -102,6 +146,7 @@ impl System {
                 .as_mut()
                 .map(|terminal| terminal as &mut dyn Terminal),
             stdin: Box::new(io::stdin()),
+            runner: Box::new(ProcessRunner),
         }
     }
 }

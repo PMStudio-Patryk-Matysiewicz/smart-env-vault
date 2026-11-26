@@ -4,7 +4,7 @@ use std::io::Write;
 use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::{CliError, Context, EnvRef, Exit, Interaction, init, lock, setup, variables};
+use crate::{CliError, Context, EnvRef, Exit, Interaction, init, lock, run, setup, variables};
 
 /// `smart-env` command line.
 #[derive(Debug, Parser)]
@@ -94,7 +94,7 @@ pub enum Command {
     /// Run a command with the environment's variables.
     Run {
         /// Only these variables.
-        #[arg(long, value_delimiter = ',')]
+        #[arg(long, value_delimiter = ',', conflicts_with = "except")]
         only: Vec<String>,
         /// All variables except these.
         #[arg(long, value_delimiter = ',')]
@@ -149,7 +149,7 @@ where
     let result = match Cli::try_parse_from(&args) {
         Ok(cli) => {
             let interaction = Interaction::detect(cli.global.yes, ctx.terminal.is_some());
-            dispatch(&cli, ctx, interaction, json, out)
+            dispatch(&cli, ctx, interaction, json, out, err)
         }
         Err(error)
             if matches!(
@@ -184,13 +184,14 @@ fn json_requested(args: &[OsString]) -> bool {
         .any(|arg| arg == "--json")
 }
 
-/// Commands without behaviour yet report `not_implemented`.
+/// Runs the parsed command.
 fn dispatch(
     cli: &Cli,
     ctx: &mut Context<'_>,
     interaction: Interaction,
     json: bool,
     out: &mut dyn Write,
+    err: &mut dyn Write,
 ) -> Result<Exit, CliError> {
     let env = cli.global.env.as_ref();
     match &cli.command {
@@ -206,14 +207,13 @@ fn dispatch(
         Command::Rename { from, to } => variables::rename(ctx, json, env, from, to, out),
         Command::History { name } => variables::history(ctx, json, env, name, out),
         Command::Undo { name, to } => variables::undo(ctx, json, env, name, *to, out),
+        Command::Run {
+            only,
+            except,
+            command,
+        } => run::run(ctx, env, only, except, command, err),
         Command::Unlock => lock::unlock(ctx, json, out),
         Command::Lock => lock::lock(ctx, json, out),
-        _ => Err(CliError::new(
-            "not_implemented",
-            Exit::Failure,
-            format!("Command {} is not available yet.", cli.command.name()),
-        )
-        .with_hint("Available commands: smart-env --help")),
     }
 }
 

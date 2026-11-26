@@ -27,6 +27,7 @@ fn smart_env(args: &[&str]) -> Output {
         current_dir: Some(dir.path().to_path_buf()),
         terminal: None,
         stdin: Box::new(std::io::empty()),
+        runner: Box::new(smart_env_cli::ProcessRunner),
     };
     let exit = execute(argv, &mut ctx, &mut out, &mut err);
     Output {

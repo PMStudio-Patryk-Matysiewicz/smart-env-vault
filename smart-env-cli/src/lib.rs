@@ -17,12 +17,13 @@ mod keys;
 mod lock;
 mod project_file;
 mod reserved;
+mod run;
 mod setup;
 mod target;
 mod variables;
 
 pub use cli::{Cli, Command, GlobalArgs, InjectArg, execute};
-pub use context::{Context, System, Terminal, UNLOCK_TTL};
+pub use context::{ChildCommand, Context, ProcessRunner, Runner, System, Terminal, UNLOCK_TTL};
 pub use dotenv::{Dotenv, DotenvEntry, DotenvError, DotenvWarning};
 pub use env_ref::{EnvRef, EnvRefError};
 pub use error::CliError;

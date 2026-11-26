@@ -2,12 +2,15 @@
 //! in-memory key stores and a scripted terminal.
 #![allow(dead_code)] // each test crate uses a different part
 
-use secrecy::SecretString;
-use smart_env_cli::{Context, Exit, Terminal, execute};
+use secrecy::{ExposeSecret, SecretString};
+use smart_env_cli::{ChildCommand, Context, Exit, Runner, Terminal, execute};
 use smart_env_vault::{DataPaths, DeviceKey, KeyError, KeyStore, MemoryStore, Vault};
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
 use tempfile::TempDir;
 
 // --- terminal ---
@@ -124,6 +127,50 @@ impl KeyStore for FailingSaveStore {
     }
 }
 
+// --- runner ---
+
+/// What `run` started: program, arguments and the added variables.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Launched {
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+}
+
+/// How the fake command ends.
+#[derive(Clone, Copy, Debug)]
+pub enum ChildResult {
+    Exit(u8),
+    NotFound,
+    PermissionDenied,
+}
+
+/// Records every command instead of starting it.
+pub struct RecordingRunner {
+    launched: Rc<RefCell<Vec<Launched>>>,
+    result: ChildResult,
+}
+
+impl Runner for RecordingRunner {
+    fn run(&mut self, command: ChildCommand) -> io::Result<u8> {
+        let text = |s: &std::ffi::OsString| s.to_str().unwrap().to_owned();
+        self.launched.borrow_mut().push(Launched {
+            program: text(&command.program),
+            args: command.args.iter().map(text).collect(),
+            env: command
+                .env
+                .iter()
+                .map(|(name, value)| (name.clone(), value.expose_secret().to_owned()))
+                .collect(),
+        });
+        match self.result {
+            ChildResult::Exit(code) => Ok(code),
+            ChildResult::NotFound => Err(io::ErrorKind::NotFound.into()),
+            ChildResult::PermissionDenied => Err(io::ErrorKind::PermissionDenied.into()),
+        }
+    }
+}
+
 // --- machine ---
 
 /// One machine: data directory, keychain (`keys`) and kernel keyring
@@ -137,6 +184,10 @@ pub struct Machine {
     pub session: Box<dyn KeyStore>,
     pub account_label: String,
     pub device_label: String,
+    /// Commands started by `run`, in order.
+    pub launched: Rc<RefCell<Vec<Launched>>>,
+    /// How the next commands started by `run` end (default: exit 0).
+    pub child: Cell<ChildResult>,
 }
 
 pub struct Run {
@@ -174,6 +225,8 @@ impl Machine {
             session: Box::new(session),
             account_label: "trawers".to_owned(),
             device_label: "laptop".to_owned(),
+            launched: Rc::default(),
+            child: Cell::new(ChildResult::Exit(0)),
         }
     }
 
@@ -187,6 +240,10 @@ impl Machine {
             current_dir: Some(self.project.clone()),
             terminal,
             stdin: Box::new(io::empty()),
+            runner: Box::new(RecordingRunner {
+                launched: Rc::clone(&self.launched),
+                result: self.child.get(),
+            }),
         }
     }
 

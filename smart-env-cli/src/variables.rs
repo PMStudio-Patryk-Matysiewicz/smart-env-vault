@@ -236,6 +236,30 @@ pub(crate) fn rename(
     Ok(Exit::Success)
 }
 
+/// `smart-env history NAME`: versions newest first with UTC times, never
+/// values; works without the device key.
+pub(crate) fn history(
+    _ctx: &mut Context<'_>,
+    _json: bool,
+    _env: Option<&EnvRef>,
+    _name: &str,
+    _out: &mut dyn Write,
+) -> Result<Exit, CliError> {
+    todo!()
+}
+
+/// `smart-env undo NAME`: brings back a removed variable, or writes the
+/// previous value as a new version. Needs the device key; never asks.
+pub(crate) fn undo(
+    _ctx: &mut Context<'_>,
+    _json: bool,
+    _env: Option<&EnvRef>,
+    _name: &str,
+    _out: &mut dyn Write,
+) -> Result<Exit, CliError> {
+    todo!()
+}
+
 // --- value input ---
 
 /// Whole stdin with exactly one trailing `\n` (or `\r\n`) cut. Reads at most

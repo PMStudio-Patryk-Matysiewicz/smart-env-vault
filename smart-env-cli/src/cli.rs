@@ -200,6 +200,8 @@ fn dispatch(
         Command::Ls => variables::ls(ctx, json, env, out),
         Command::Rm { name } => variables::rm(ctx, json, env, name, out),
         Command::Rename { from, to } => variables::rename(ctx, json, env, from, to, out),
+        Command::History { name } => variables::history(ctx, json, env, name, out),
+        Command::Undo { name } => variables::undo(ctx, json, env, name, out),
         Command::Unlock => lock::unlock(ctx, json, out),
         Command::Lock => lock::lock(ctx, json, out),
         _ => Err(CliError::new(

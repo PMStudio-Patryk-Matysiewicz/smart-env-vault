@@ -171,7 +171,7 @@ fn key_source(ctx: &Context<'_>, data: &DataPaths) -> Result<Source, CliError> {
 
 /// Asks for a new passphrase twice, up to [`CONFIRM_ATTEMPTS`] times.
 fn choose_passphrase(terminal: &mut dyn Terminal) -> Result<SecretString, CliError> {
-    terminal.show("! No system keychain — the device key will be encrypted with a passphrase.\n");
+    terminal.show("! No system keychain. The device key will be encrypted with a passphrase.\n");
     for attempt in 1..=CONFIRM_ATTEMPTS {
         let first = terminal
             .ask_secret("? Passphrase for the device key: ")
@@ -229,7 +229,7 @@ fn create_private_dir(directory: &Path) -> Result<(), CliError> {
 fn confirm_recovery(terminal: &mut dyn Terminal, key: &SecretString) -> Result<(), CliError> {
     let key = key.expose_secret();
     let shown = Zeroizing::new(format!(
-        "! Recovery key (shown only once) — save it in your password manager.\n  \
+        "! Recovery key (shown only once). Save it in your password manager.\n  \
          Without it, losing this device means losing your secrets.\n  {key}\n"
     ));
     terminal.show(&shown);
@@ -243,7 +243,7 @@ fn confirm_recovery(terminal: &mut dyn Terminal, key: &SecretString) -> Result<(
             return Ok(());
         }
         if attempt < CONFIRM_ATTEMPTS {
-            terminal.show("✗ That does not match — check the saved key and try again.\n");
+            terminal.show("✗ That does not match. Check the saved key and try again.\n");
         }
     }
     Err(recovery_not_confirmed())
@@ -370,5 +370,5 @@ fn recovery_not_confirmed() -> CliError {
         Exit::Failure,
         "The recovery key was not confirmed; nothing was saved.",
     )
-    .with_hint("Run smart-env setup again — it will show a new key")
+    .with_hint("Run smart-env setup again to get a new key")
 }

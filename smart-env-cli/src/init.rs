@@ -128,7 +128,7 @@ pub(crate) fn run(
     }
 
     write_project_file(&dir, &project, &project_id.to_string(), &default_env)?;
-    report.line("✓ Created smart-env.toml (no secrets — safe to commit)");
+    report.line("✓ Created smart-env.toml (no secrets, safe to commit)");
 
     let files: Vec<String> = sources
         .iter()
@@ -148,14 +148,14 @@ pub(crate) fn run(
     for entry in &history {
         if entry.commits > 0 {
             report.line(&format!(
-                "! {} was in git history ({}) — values may be known; consider rotating: smart-env scan --history",
+                "! {} was in git history ({}), so values may be known. Consider rotating: smart-env scan --history",
                 entry.file,
                 count(entry.commits, "commit")
             ));
         }
         if entry.tracked {
             report.line(&format!(
-                "! {} is tracked by git — stop tracking it: git rm --cached {}",
+                "! {} is tracked by git. Stop tracking it: git rm --cached {}",
                 entry.file, entry.file
             ));
         }
@@ -175,7 +175,7 @@ pub(crate) fn run(
             "are reserved names"
         };
         report.line(&format!(
-            "! {} {verb} — the shell hook skips them until allowed: smart-env allow --var NAME",
+            "! {} {verb}. The shell hook skips them until allowed: smart-env allow --var NAME",
             reserved.join(", ")
         ));
     }
@@ -203,13 +203,13 @@ pub(crate) fn run(
             report.line(&format!("✓ Deleted {}", count(deleted.len(), "file")));
             if !failed.is_empty() {
                 report.line(&format!(
-                    "! Could not delete {} — delete them yourself",
+                    "! Could not delete {}. Delete them yourself",
                     failed.join(", ")
                 ));
             }
         } else {
             report.line(&format!(
-                "! Plaintext files kept: {} — delete them when ready",
+                "! Plaintext files kept: {}. Delete them when ready",
                 files.join(", ")
             ));
         }
@@ -427,7 +427,7 @@ fn parse_source(dir: &Path, source: &Source) -> Result<Import, CliError> {
         let parsed = Dotenv::parse(&bytes).map_err(|error| env_file_invalid(file, &error))?;
         warnings.extend(parsed.warnings.iter().map(|warning| match warning {
             DotenvWarning::Interpolation { name, line } => format!(
-                "{file} line {line}: {name} contains ${{…}} or $NAME — kept literally, smart-env does not substitute"
+                "{file} line {line}: {name} contains ${{…}} or $NAME, kept literally (smart-env does not substitute)"
             ),
         }));
         for entry in parsed.entries {

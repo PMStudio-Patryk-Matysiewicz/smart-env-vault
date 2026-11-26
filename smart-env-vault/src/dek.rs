@@ -9,7 +9,7 @@ use zeroize::Zeroizing;
 
 /// Data Encryption Key: a random 256-bit key of one environment.
 ///
-/// Encrypts secret values with AES-256-GCM. Never stored in plain form —
+/// Encrypts secret values with AES-256-GCM. Never stored in plain form,
 /// only as a [`WrappedDek`] encrypted for the device and recovery keys.
 /// Bytes are wiped from memory on drop; `Debug` prints `Dek(..)`.
 pub struct Dek(pub(crate) Zeroizing<[u8; 32]>);

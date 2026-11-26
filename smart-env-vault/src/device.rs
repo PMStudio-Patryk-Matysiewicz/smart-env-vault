@@ -15,9 +15,9 @@ const ED25519_LABEL: &[u8] = b"smart-env/device/ed25519";
 
 /// Private keys of this device, derived from one 32-byte seed (ADR-002):
 ///
-/// - X25519 (`age` identity) — opens [`WrappedDek`](crate::WrappedDek)s via
+/// - X25519 (`age` identity): opens [`WrappedDek`](crate::WrappedDek)s via
 ///   [`Unwrapper`](crate::Unwrapper),
-/// - Ed25519 — signs requests and attestations (stage 2, ADR-009).
+/// - Ed25519: signs requests and attestations (stage 2, ADR-009).
 ///
 /// Each is HKDF-SHA256 of the seed with its own label
 /// (`smart-env/device/x25519`, `smart-env/device/ed25519`). Generated locally

@@ -125,7 +125,7 @@ fn history_lists_versions_newest_first_without_values() {
     let lines: Vec<&str> = run.stdout.lines().collect();
     assert_eq!(
         lines[0],
-        "API_KEY in payments/dev — current value: version 3"
+        "API_KEY in payments/dev (current value: version 3)"
     );
     assert_eq!(listed_versions(&run.stdout), [3, 2, 1]);
     assert!(lines[1].starts_with("  3  "), "{}", run.stdout);
@@ -161,7 +161,7 @@ fn history_with_env_flag_repeats_it_in_the_undo_hint() {
 
     assert!(
         run.stdout
-            .starts_with("API_KEY in payments/prod — current value: version 2\n"),
+            .starts_with("API_KEY in payments/prod (current value: version 2)\n"),
         "{}",
         run.stdout
     );
@@ -215,7 +215,7 @@ fn history_of_a_removed_variable_shows_it_and_points_at_undo() {
     let lines: Vec<&str> = run.stdout.lines().collect();
     assert_eq!(
         lines[0],
-        "API_KEY in payments/dev — removed (last value: version 2)"
+        "API_KEY in payments/dev (removed, last value: version 2)"
     );
     assert!(lines[1].ends_with(" UTC  removed"), "{}", run.stdout);
     assert!(!run.stdout.contains("(current)"), "{}", run.stdout);
@@ -332,7 +332,7 @@ fn history_shows_rm_and_restore_above_the_current_version() {
     let lines: Vec<&str> = run.stdout.lines().collect();
     assert_eq!(
         lines[0],
-        "API_KEY in payments/dev — current value: version 2"
+        "API_KEY in payments/dev (current value: version 2)"
     );
     assert!(lines[1].ends_with(" UTC  restored"), "{}", run.stdout);
     assert!(lines[2].ends_with(" UTC  removed"), "{}", run.stdout);
@@ -352,7 +352,7 @@ fn history_follows_a_renamed_variable() {
     let lines: Vec<&str> = run.stdout.lines().collect();
     assert_eq!(
         lines[0],
-        "STRIPE_KEY in payments/dev — current value: version 2"
+        "STRIPE_KEY in payments/dev (current value: version 2)"
     );
     assert!(lines[1].starts_with("  2  "), "{}", run.stdout);
     assert!(

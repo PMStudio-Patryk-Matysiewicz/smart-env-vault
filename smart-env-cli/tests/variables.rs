@@ -293,7 +293,7 @@ fn set_inject_run_marks_the_variable_run_only() {
     assert_eq!(meta(&m, "dev", "ANALYTICS_TOKEN").inject, Inject::Run);
     assert!(
         run.stdout.contains(
-            "✓ ANALYTICS_TOKEN saved in payments/dev (version 1) — only for smart-env run, not exported to the shell"
+            "✓ ANALYTICS_TOKEN saved in payments/dev (version 1, smart-env run only, not exported to the shell)"
         ),
         "{}",
         run.stdout
@@ -325,7 +325,7 @@ fn set_without_inject_keeps_run_and_inject_shell_switches_back() {
     let kept = ok(piped(&m, &["set", "T", "--stdin"], "2\n"));
     assert_eq!(meta(&m, "dev", "T").inject, Inject::Run);
     assert!(
-        kept.stdout.contains("only for smart-env run"),
+        kept.stdout.contains("smart-env run only"),
         "{}",
         kept.stdout
     );
@@ -337,7 +337,7 @@ fn set_without_inject_keeps_run_and_inject_shell_switches_back() {
     ));
     assert_eq!(meta(&m, "dev", "T").inject, Inject::Shell);
     assert!(
-        !back.stdout.contains("only for smart-env run"),
+        !back.stdout.contains("smart-env run only"),
         "{}",
         back.stdout
     );
@@ -358,7 +358,7 @@ fn set_reserved_name_is_saved_with_a_warning() {
     );
     assert!(
         run.stdout.contains(
-            "! NODE_OPTIONS is a reserved name — the shell hook skips it until allowed: smart-env allow --var NODE_OPTIONS"
+            "! NODE_OPTIONS is a reserved name. The shell hook skips it until allowed: smart-env allow --var NODE_OPTIONS"
         ),
         "{}",
         run.stdout
@@ -844,7 +844,7 @@ fn rename_to_a_reserved_name_warns() {
 
     assert!(
         run.stdout.contains(
-            "! GIT_TOKEN is a reserved name — the shell hook skips it until allowed: smart-env allow --var GIT_TOKEN"
+            "! GIT_TOKEN is a reserved name. The shell hook skips it until allowed: smart-env allow --var GIT_TOKEN"
         ),
         "{}",
         run.stdout

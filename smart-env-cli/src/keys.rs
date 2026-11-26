@@ -6,8 +6,8 @@ use smart_env_vault::{DeviceKey, KeyError, VaultError};
 
 use crate::{CliError, Context, Exit};
 
-/// The device key: from the system keychain, or — when the data directory
-/// holds `device.key` (passphrase mode) — from the kernel keyring after
+/// The device key: from the system keychain, or (when the data directory
+/// holds `device.key`, passphrase mode) from the kernel keyring after
 /// `smart-env unlock`.
 ///
 /// # Errors

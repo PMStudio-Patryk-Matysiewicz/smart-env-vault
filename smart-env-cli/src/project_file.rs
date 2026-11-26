@@ -63,7 +63,7 @@ impl ResolvedProject {
     /// Warning to show when the project was renamed since the file was written.
     pub fn warning(&self) -> Option<String> {
         self.renamed_to.as_ref().map(|name| {
-            format!("The project is now called {name} — update project in smart-env.toml.")
+            format!("The project is now called {name}. Update project in smart-env.toml.")
         })
     }
 }
@@ -171,7 +171,7 @@ impl ProjectFile {
                     "project_id_mismatch",
                     Exit::Conflict,
                     format!(
-                        "Project {} has a different project_id in the vault than in smart-env.toml — not activated.",
+                        "Project {} has a different project_id in the vault than in smart-env.toml, so it was not activated.",
                         self.project
                     ),
                 )
@@ -229,7 +229,7 @@ impl From<ProjectFileError> for CliError {
                     Exit::Failure,
                     format!("smart-env.toml: unknown key {key}."),
                     format!(
-                        "smart-env.toml does not hold secrets — remove the key from the file and store the variable: smart-env set {key}"
+                        "smart-env.toml does not hold secrets. Remove the key from the file and store the variable: smart-env set {key}"
                     ),
                 )
             }

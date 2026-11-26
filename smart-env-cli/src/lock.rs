@@ -119,7 +119,7 @@ fn not_needed(out: &mut dyn Write, json: bool, action: &str) {
     } else {
         writeln!(
             out,
-            "✓ Nothing to {action} — the device key is in the system keychain"
+            "✓ Nothing to {action}: the device key is in the system keychain"
         )
     };
 }

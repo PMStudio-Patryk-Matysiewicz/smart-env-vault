@@ -33,7 +33,7 @@ pub struct DotenvEntry {
 /// A non-fatal finding while parsing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DotenvWarning {
-    /// `${VAR}` or `$VAR` kept literally — smart-env never substitutes.
+    /// `${VAR}` or `$VAR` kept literally; smart-env never substitutes.
     Interpolation {
         /// Variable whose value contains the reference.
         name: VarName,
@@ -114,7 +114,7 @@ impl fmt::Display for DotenvError {
             ),
             Self::AmbiguousComment { line } => write!(
                 formatter,
-                "line {line}: value starts with # — put it in quotes if # is part of the value"
+                "line {line}: value starts with #. Put it in quotes if # is part of the value"
             ),
             Self::UnterminatedQuote { line } => {
                 write!(formatter, "line {line}: quote is never closed")
@@ -127,7 +127,7 @@ impl fmt::Display for DotenvError {
             }
             Self::UnsupportedQuote { line } => write!(
                 formatter,
-                "line {line}: backtick quotes are not supported — use single or double quotes"
+                "line {line}: backtick quotes are not supported. Use single or double quotes"
             ),
             Self::Duplicate {
                 name,
@@ -135,7 +135,7 @@ impl fmt::Display for DotenvError {
                 second,
             } => write!(
                 formatter,
-                "{name} is defined twice, in lines {first} and {second} — keep one"
+                "{name} is defined twice, in lines {first} and {second}. Keep one"
             ),
             Self::InvalidValue { name, line, reason } => {
                 write!(formatter, "line {line}: {name}: {reason}")

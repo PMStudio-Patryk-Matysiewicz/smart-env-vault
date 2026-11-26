@@ -131,7 +131,7 @@ impl Command {
 /// Runs the CLI with `args` (program name first) and returns the exit code.
 ///
 /// Normal output goes to `out`. Errors go to `err` as `✗ …`, or to `out` as
-/// JSON with `--json` — also when the arguments themselves are wrong.
+/// JSON with `--json`, also when the arguments themselves are wrong.
 /// Whether there is a terminal in `ctx` decides interactive mode together
 /// with `--yes`.
 pub fn execute<I, T>(

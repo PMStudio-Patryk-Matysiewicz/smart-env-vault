@@ -73,14 +73,14 @@ pub(crate) fn set(
         );
     } else {
         let run_only = if inject == Inject::Run {
-            " — only for smart-env run, not exported to the shell"
+            ", smart-env run only, not exported to the shell"
         } else {
             ""
         };
         print_warnings(out, &warnings);
         let _ = writeln!(
             out,
-            "✓ {name} saved in {label} (version {}){run_only}",
+            "✓ {name} saved in {label} (version {}{run_only})",
             outcome.version
         );
     }
@@ -337,11 +337,11 @@ pub(crate) fn history(
 
     print_warnings(out, &warnings);
     let state = if timeline.removed {
-        format!("removed (last value: version {newest})")
+        format!("removed, last value: version {newest}")
     } else {
         format!("current value: version {newest}")
     };
-    let _ = writeln!(out, "{name} in {} — {state}", target.label());
+    let _ = writeln!(out, "{name} in {} ({state})", target.label());
     let width = versions
         .iter()
         .map(|meta| meta.version.to_string().len())
@@ -594,7 +594,7 @@ fn warnings(target: &Target, reserved: Option<&VarName>) -> Vec<String> {
     let mut warnings = target.warnings.clone();
     if let Some(name) = reserved {
         warnings.push(format!(
-            "{name} is a reserved name — the shell hook skips it until allowed: smart-env allow --var {name}"
+            "{name} is a reserved name. The shell hook skips it until allowed: smart-env allow --var {name}"
         ));
     }
     warnings

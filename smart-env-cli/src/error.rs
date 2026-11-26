@@ -189,7 +189,7 @@ impl From<VaultError> for CliError {
                 "vault_exists",
                 Conflict,
                 "The vault already exists.".to_owned(),
-                "Nothing to do — smart-env setup has already run",
+                "Nothing to do: smart-env setup has already run",
             ),
             VaultError::UnsupportedSchema => (
                 "unsupported_vault",
@@ -260,7 +260,7 @@ impl From<VaultError> for CliError {
             VaultError::Secret(SecretError::Decrypt) => (
                 "decrypt_failed",
                 Failure,
-                "The value cannot be decrypted — the data is corrupted or was tampered with."
+                "The value cannot be decrypted. The data is corrupted or was tampered with."
                     .to_owned(),
                 doctor,
             ),

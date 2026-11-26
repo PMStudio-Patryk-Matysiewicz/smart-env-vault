@@ -769,8 +769,8 @@ impl Vault {
     /// automatically.
     ///
     /// # Errors
-    /// [`VaultError::Key`] (`Unwrap`) if `key` cannot open some DEK —
-    /// nothing is written; [`VaultError::RecipientKeyTaken`] if this public
+    /// [`VaultError::Key`] (`Unwrap`) if `key` cannot open some DEK
+    /// (nothing is written); [`VaultError::RecipientKeyTaken`] if this public
     /// key is already a recipient; [`VaultError::DeviceNeedsAccount`] for
     /// [`RecipientKind::Device`] (use [`Vault::add_device`]).
     pub fn add_recipient(
@@ -961,7 +961,7 @@ impl Vault {
     /// [`revision`](Vault::revision).
     ///
     /// # Errors
-    /// [`VaultError::Key`] (`Unwrap`) for a wrong key — nothing is written;
+    /// [`VaultError::Key`] (`Unwrap`) for a wrong key (nothing is written);
     /// [`VaultError::EnvironmentNotFound`] for an unknown environment.
     pub fn set(
         &mut self,
@@ -1372,8 +1372,8 @@ impl Vault {
     }
 
     /// Current name of the secret most recently renamed away from `name` in
-    /// this environment, if it is not called `name` again — for hints when
-    /// someone uses the old name.
+    /// this environment, if it is not called `name` again. Used for hints
+    /// when someone types the old name.
     ///
     /// # Errors
     /// [`VaultError::EnvironmentNotFound`].
@@ -1410,7 +1410,7 @@ impl Vault {
     /// # Errors
     /// [`VaultError::SecretNotFound`] if the secret does not exist (or was purged),
     /// [`VaultError::NothingToUndo`] if there is no previous version,
-    /// [`VaultError::Key`] (`Unwrap`) for a wrong key — nothing is written.
+    /// [`VaultError::Key`] (`Unwrap`) for a wrong key (nothing is written).
     pub fn undo(
         &mut self,
         env: EnvironmentId,
@@ -1445,7 +1445,7 @@ impl Vault {
     /// removed (bring it back with [`undo`](Vault::undo) first);
     /// [`VaultError::NothingToUndo`] if `version` is the current one;
     /// [`VaultError::VersionNotFound`] if `version` is not in the history;
-    /// [`VaultError::Key`] (`Unwrap`) for a wrong key — nothing is written.
+    /// [`VaultError::Key`] (`Unwrap`) for a wrong key (nothing is written).
     pub fn restore(
         &mut self,
         env: EnvironmentId,
@@ -1523,7 +1523,7 @@ impl Vault {
     }
 
     /// Reads and decrypts every live secret of an environment, sorted by
-    /// name — what `run` and the shell hook need. Unwraps each DEK version
+    /// name: what `run` and the shell hook need. Unwraps each DEK version
     /// once (normally once per environment) and always checks the key, even
     /// for an empty environment.
     ///
@@ -1671,8 +1671,8 @@ fn active_dek(
 /// Unwraps a specific (possibly retired) DEK version of an environment with
 /// the caller's own envelope, found by its public key.
 ///
-/// No envelope for this key is [`KeyError::Unwrap`] — the same as a key
-/// that fails to open one — so a stranger cannot tell the two apart.
+/// No envelope for this key is [`KeyError::Unwrap`], the same as a key
+/// that fails to open one, so a stranger cannot tell the two apart.
 fn dek_at(
     conn: &Connection,
     env: EnvironmentId,

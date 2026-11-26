@@ -186,13 +186,25 @@ impl Machine {
             device_label: self.device_label.clone(),
             current_dir: Some(self.project.clone()),
             terminal,
+            stdin: Box::new(io::empty()),
         }
     }
 
     pub fn run(&self, args: &[&str], terminal: Option<&mut ScriptedTerminal>) -> Run {
+        self.run_with_stdin(args, terminal, b"")
+    }
+
+    /// Like [`Machine::run`], with `stdin` as standard input.
+    pub fn run_with_stdin(
+        &self,
+        args: &[&str],
+        terminal: Option<&mut ScriptedTerminal>,
+        stdin: &[u8],
+    ) -> Run {
         let mut out = Vec::new();
         let mut err = Vec::new();
         let mut ctx = self.context(terminal.map(|t| t as &mut dyn Terminal));
+        ctx.stdin = Box::new(stdin);
         let argv = std::iter::once("smart-env").chain(args.iter().copied());
         let exit = execute(argv, &mut ctx, &mut out, &mut err);
         Run {

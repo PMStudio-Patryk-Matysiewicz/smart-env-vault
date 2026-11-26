@@ -26,6 +26,7 @@ fn smart_env(args: &[&str]) -> Output {
         device_label: "laptop".to_owned(),
         current_dir: Some(dir.path().to_path_buf()),
         terminal: None,
+        stdin: Box::new(std::io::empty()),
     };
     let exit = execute(argv, &mut ctx, &mut out, &mut err);
     Output {

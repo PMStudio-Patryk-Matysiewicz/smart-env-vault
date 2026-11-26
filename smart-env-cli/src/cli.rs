@@ -4,7 +4,7 @@ use std::io::Write;
 use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::{CliError, Context, EnvRef, Exit, Interaction, init, lock, setup};
+use crate::{CliError, Context, EnvRef, Exit, Interaction, init, lock, setup, variables};
 
 /// `smart-env` command line.
 #[derive(Debug, Parser)]
@@ -188,9 +188,18 @@ fn dispatch(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<Exit, CliError> {
-    match cli.command {
+    let env = cli.global.env.as_ref();
+    match &cli.command {
         Command::Setup => setup::run(ctx, interaction, json, out),
-        Command::Init => init::run(ctx, interaction, json, cli.global.env.as_ref(), out),
+        Command::Init => init::run(ctx, interaction, json, env, out),
+        Command::Set {
+            name,
+            stdin,
+            inject,
+        } => variables::set(ctx, json, env, name, *stdin, *inject, out),
+        Command::Ls => variables::ls(ctx, json, env, out),
+        Command::Rm { name } => variables::rm(ctx, json, env, name, out),
+        Command::Rename { from, to } => variables::rename(ctx, json, env, from, to, out),
         Command::Unlock => lock::unlock(ctx, json, out),
         Command::Lock => lock::lock(ctx, json, out),
         _ => Err(CliError::new(

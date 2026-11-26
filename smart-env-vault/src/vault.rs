@@ -847,6 +847,24 @@ impl Vault {
         Ok(outcome)
     }
 
+    /// Like [`set`](Vault::set), and in the same transaction sets where the
+    /// secret is injected: `Some` sets it, `None` keeps the current one (a new
+    /// secret gets [`Inject::Shell`]). The environment
+    /// [`revision`](Vault::revision) grows by exactly 1.
+    ///
+    /// # Errors
+    /// As [`set`](Vault::set); on error nothing changes, `inject` included.
+    pub fn set_with(
+        &mut self,
+        _env: EnvironmentId,
+        _name: &VarName,
+        _value: &SecretValue,
+        _inject: Option<Inject>,
+        _key: &impl Unwrapper,
+    ) -> Result<SetOutcome, VaultError> {
+        todo!()
+    }
+
     /// Reads and decrypts a secret; `Ok(None)` if no secret has this name.
     ///
     /// Uses the DEK version stored in the row (not the active one), so values

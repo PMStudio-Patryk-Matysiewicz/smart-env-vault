@@ -1009,6 +1009,105 @@ fn set_inject_on_missing_or_removed_secret_is_not_found() {
     }
 }
 
+// --- set_with: value and inject in one transaction (set --inject) ----------------
+
+fn put_with(f: &mut Fixture, var: &str, text: &str, inject: Option<Inject>) -> SetOutcome {
+    f.vault
+        .set_with(f.env, &name(var), &value(text), inject, &f.device)
+        .unwrap()
+}
+
+fn inject_of(f: &Fixture, var: &str) -> Inject {
+    f.vault
+        .list(f.env)
+        .unwrap()
+        .into_iter()
+        .find(|meta| meta.name.as_str() == var)
+        .unwrap_or_else(|| panic!("{var} listed"))
+        .inject
+}
+
+#[test]
+fn set_with_run_creates_run_only_secret_in_one_revision() {
+    let mut f = setup();
+    let outcome = put_with(&mut f, "A", "a", Some(Inject::Run));
+    assert_eq!(outcome.version, 1);
+    assert_eq!(inject_of(&f, "A"), Inject::Run);
+    assert_eq!(read(&f, "A").as_deref(), Some("a"));
+    assert_eq!(revision(&f), 1, "value and inject are one change");
+}
+
+#[test]
+fn set_with_none_creates_shell_secret() {
+    let mut f = setup();
+    put_with(&mut f, "A", "a", None);
+    assert_eq!(inject_of(&f, "A"), Inject::Shell);
+}
+
+#[test]
+fn set_with_changes_inject_of_existing_secret_with_new_version() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    let outcome = put_with(&mut f, "A", "b", Some(Inject::Run));
+    assert_eq!(outcome.version, 2);
+    assert_eq!(inject_of(&f, "A"), Inject::Run);
+    assert_eq!(read(&f, "A").as_deref(), Some("b"));
+    assert_eq!(revision(&f), 2);
+
+    put_with(&mut f, "A", "c", Some(Inject::Shell));
+    assert_eq!(inject_of(&f, "A"), Inject::Shell);
+    assert_eq!(revision(&f), 3);
+}
+
+#[test]
+fn set_with_none_keeps_inject_of_existing_secret() {
+    let mut f = setup();
+    put_with(&mut f, "A", "a", Some(Inject::Run));
+    put_with(&mut f, "A", "b", None);
+    assert_eq!(inject_of(&f, "A"), Inject::Run);
+}
+
+#[test]
+fn set_with_resurrects_removed_secret_with_inject() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    f.vault.remove(f.env, &name("A")).unwrap();
+    let outcome = put_with(&mut f, "A", "b", Some(Inject::Run));
+    assert_eq!(outcome.version, 2);
+    assert_eq!(inject_of(&f, "A"), Inject::Run);
+    assert_eq!(versions(&f, "A"), [2, 1]);
+}
+
+#[test]
+fn set_with_wrong_key_changes_nothing_inject_included() {
+    let mut f = setup();
+    put(&mut f, "A", "a");
+    let result = f.vault.set_with(
+        f.env,
+        &name("A"),
+        &value("evil"),
+        Some(Inject::Run),
+        &DeviceKey::generate(),
+    );
+    assert!(matches!(err(result), VaultError::Key(KeyError::Unwrap)));
+    assert_eq!(inject_of(&f, "A"), Inject::Shell);
+    assert_eq!(read(&f, "A").as_deref(), Some("a"));
+    assert_eq!(revision(&f), 1);
+}
+
+#[test]
+fn set_with_in_unknown_environment_is_not_found() {
+    let mut f = setup();
+    let result = f.vault.set_with(
+        EnvironmentId::new(),
+        &name("A"),
+        &value("a"),
+        Some(Inject::Run),
+        &f.device,
+    );
+    assert!(matches!(err(result), VaultError::EnvironmentNotFound));
+}
+
 // --- C6: read_all and import -----------------------------------------------------
 
 /// Unwrapper that counts how many envelopes it was asked to open.

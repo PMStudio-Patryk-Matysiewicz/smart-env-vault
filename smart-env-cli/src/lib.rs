@@ -18,6 +18,8 @@ mod lock;
 mod project_file;
 mod reserved;
 mod setup;
+mod target;
+mod variables;
 
 pub use cli::{Cli, Command, GlobalArgs, InjectArg, execute};
 pub use context::{Context, System, Terminal, UNLOCK_TTL};

@@ -3,7 +3,7 @@
 //! builds it from the system ([`System`]); tests build it from temporary
 //! directories and fakes.
 
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -52,6 +52,8 @@ pub struct Context<'a> {
     pub current_dir: Option<PathBuf>,
     /// The user's terminal; `None` without one (pipe, CI, installer).
     pub terminal: Option<&'a mut dyn Terminal>,
+    /// Standard input, read only on request (`set --stdin`).
+    pub stdin: Box<dyn Read + 'a>,
 }
 
 /// Owns the real system resources a [`Context`] borrows.
@@ -99,6 +101,7 @@ impl System {
                 .terminal
                 .as_mut()
                 .map(|terminal| terminal as &mut dyn Terminal),
+            stdin: Box::new(io::stdin()),
         }
     }
 }

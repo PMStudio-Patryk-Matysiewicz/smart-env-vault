@@ -177,15 +177,12 @@ pub(crate) fn rm(
             }),
         );
     } else {
-        let env_flag = env.map_or_else(String::new, |env| match &env.project {
-            Some(project) => format!(" --env {project}/{}", env.environment),
-            None => format!(" --env {}", env.environment),
-        });
         print_warnings(out, &warnings);
         let _ = writeln!(
             out,
-            "✓ Removed {name} from {} (undo: smart-env undo {name}{env_flag})",
-            target.label()
+            "✓ Removed {name} from {} (undo: smart-env undo {name}{})",
+            target.label(),
+            env_flag(env)
         );
     }
     Ok(Exit::Success)
@@ -239,25 +236,129 @@ pub(crate) fn rename(
 /// `smart-env history NAME`: versions newest first with UTC times, never
 /// values; works without the device key.
 pub(crate) fn history(
-    _ctx: &mut Context<'_>,
-    _json: bool,
-    _env: Option<&EnvRef>,
-    _name: &str,
-    _out: &mut dyn Write,
+    ctx: &mut Context<'_>,
+    json: bool,
+    env: Option<&EnvRef>,
+    name: &str,
+    out: &mut dyn Write,
 ) -> Result<Exit, CliError> {
-    todo!()
+    let name = parse_name(name)?;
+    let (vault, target) = target::resolve(ctx, env)?;
+    let versions = vault
+        .history(target.environment.id, &name)
+        .map_err(|error| match error {
+            VaultError::SecretNotFound => CliError::from(error).with_hint(format!(
+                "List variables: smart-env ls — a removed variable comes back with: smart-env undo {name}{}",
+                env_flag(env)
+            )),
+            error => error.into(),
+        })?;
+
+    let warnings = warnings(&target, None);
+    if json {
+        let versions: Vec<_> = versions
+            .iter()
+            .enumerate()
+            .map(|(i, meta)| {
+                json!({
+                    "version": meta.version,
+                    "created_at": meta.created_at,
+                    "current": i == 0,
+                })
+            })
+            .collect();
+        print_json(
+            out,
+            json!({
+                "project": target.project,
+                "environment": target.environment.name,
+                "name": name.as_str(),
+                "versions": versions,
+                "warnings": warnings,
+            }),
+        );
+        return Ok(Exit::Success);
+    }
+
+    print_warnings(out, &warnings);
+    let _ = writeln!(out, "{name} in {}", target.label());
+    let width = versions
+        .iter()
+        .map(|meta| meta.version.to_string().len())
+        .max()
+        .unwrap_or(1);
+    for (i, meta) in versions.iter().enumerate() {
+        let current = if i == 0 { "  (current)" } else { "" };
+        let _ = writeln!(
+            out,
+            "  {:>width$}  {} UTC{current}",
+            meta.version, meta.created_at
+        );
+    }
+    if versions.len() > 1 {
+        let _ = writeln!(
+            out,
+            "Restore the previous value: smart-env undo {name}{}",
+            env_flag(env)
+        );
+    }
+    Ok(Exit::Success)
 }
 
 /// `smart-env undo NAME`: brings back a removed variable, or writes the
 /// previous value as a new version. Needs the device key; never asks.
 pub(crate) fn undo(
-    _ctx: &mut Context<'_>,
-    _json: bool,
-    _env: Option<&EnvRef>,
-    _name: &str,
-    _out: &mut dyn Write,
+    ctx: &mut Context<'_>,
+    json: bool,
+    env: Option<&EnvRef>,
+    name: &str,
+    out: &mut dyn Write,
 ) -> Result<Exit, CliError> {
-    todo!()
+    let name = parse_name(name)?;
+    let (mut vault, target) = target::resolve(ctx, env)?;
+    let key = device_key(ctx)?;
+    let env_id = target.environment.id;
+
+    // The library returns only the version after the operation; what is
+    // restored is decided here, before anything changes.
+    let live = vault.list(env_id)?.iter().any(|meta| meta.name == name);
+    let restored_version = if live {
+        vault
+            .history(env_id, &name)?
+            .get(1)
+            .map(|meta| meta.version)
+    } else {
+        None
+    };
+    let version = vault.undo(env_id, &name, &key)?;
+
+    let warnings = warnings(&target, None);
+    let label = target.label();
+    if json {
+        print_json(
+            out,
+            json!({
+                "status": "restored",
+                "project": target.project,
+                "environment": target.environment.name,
+                "name": name.as_str(),
+                "version": version,
+                "restored_version": restored_version,
+                "was_removed": !live,
+                "warnings": warnings,
+            }),
+        );
+    } else {
+        print_warnings(out, &warnings);
+        let _ = match restored_version {
+            Some(restored) => writeln!(
+                out,
+                "✓ {name} restored to version {restored} in {label} (saved as version {version})"
+            ),
+            None => writeln!(out, "✓ {name} restored in {label} (version {version})"),
+        };
+    }
+    Ok(Exit::Success)
 }
 
 // --- value input ---
@@ -304,6 +405,15 @@ fn prompt(ctx: &mut Context<'_>, name: &VarName) -> Result<SecretValue, CliError
 
 fn parse_name(name: &str) -> Result<VarName, CliError> {
     VarName::parse(name).map_err(|error| VaultError::Secret(error).into())
+}
+
+/// ` --env <as typed>` when `--env` was given, for hints that repeat a
+/// command.
+fn env_flag(env: Option<&EnvRef>) -> String {
+    env.map_or_else(String::new, |env| match &env.project {
+        Some(project) => format!(" --env {project}/{}", env.environment),
+        None => format!(" --env {}", env.environment),
+    })
 }
 
 fn inject_str(inject: Inject) -> &'static str {

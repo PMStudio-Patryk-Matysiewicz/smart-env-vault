@@ -8,3 +8,4 @@ smart-env-vault-architecture
 *.db-*
 # Test fixtures: known seed, no real secrets
 !smart-env-vault/tests/fixtures/*.db
+/smart-env.toml

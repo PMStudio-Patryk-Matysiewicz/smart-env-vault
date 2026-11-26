@@ -93,6 +93,10 @@ CREATE TABLE secrets (
     updated_at     TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     deleted_at     TEXT,
     inject         TEXT    NOT NULL DEFAULT 'shell' CHECK (inject IN ('shell', 'run')),
+    operation      TEXT    NOT NULL DEFAULT 'unknown'
+                       CHECK (operation IN ('import', 'set', 'undo', 'unknown')),
+    restored_version INTEGER CHECK (restored_version >= 1)
+                       CHECK ((operation = 'undo') = (restored_version IS NOT NULL)),
     UNIQUE (environment_id, name),
     FOREIGN KEY (environment_id, dek_version)
         REFERENCES environment_deks (environment_id, version)
@@ -106,5 +110,24 @@ CREATE TABLE secret_versions (
     nonce          BLOB    NOT NULL CHECK (length(nonce) = 12),
     ciphertext     BLOB    NOT NULL CHECK (length(ciphertext) BETWEEN 16 AND 65552),
     created_at     TEXT    NOT NULL,
+    operation      TEXT    NOT NULL DEFAULT 'unknown'
+                       CHECK (operation IN ('import', 'set', 'undo', 'unknown')),
+    restored_version INTEGER CHECK (restored_version >= 1)
+                       CHECK ((operation = 'undo') = (restored_version IS NOT NULL)),
     PRIMARY KEY (key_id, version)
 ) STRICT;
+
+-- Changes of a secret that are not new values (schema 3).
+CREATE TABLE secret_events (
+    id            INTEGER NOT NULL PRIMARY KEY,
+    key_id        BLOB    NOT NULL REFERENCES secrets(key_id) ON DELETE CASCADE,
+    after_version INTEGER NOT NULL CHECK (after_version >= 1),
+    kind          TEXT    NOT NULL CHECK (kind IN ('rename', 'remove', 'restore')),
+    from_name     TEXT,
+    to_name       TEXT,
+    at            TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK ((kind = 'rename') = (from_name IS NOT NULL)),
+    CHECK ((kind = 'rename') = (to_name IS NOT NULL))
+) STRICT;
+
+CREATE INDEX secret_events_by_secret ON secret_events (key_id, id);

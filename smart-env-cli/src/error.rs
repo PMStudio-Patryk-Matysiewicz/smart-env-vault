@@ -149,6 +149,12 @@ impl From<VaultError> for CliError {
                 "No earlier version to restore.".to_owned(),
                 "Variable history: smart-env history NAME",
             ),
+            VaultError::VersionNotFound => (
+                "version_not_found",
+                NotFound,
+                "This version is not in the variable's history.".to_owned(),
+                "Versions: smart-env history NAME",
+            ),
             VaultError::ProjectNameTaken => (
                 "project_name_taken",
                 Conflict,

@@ -33,6 +33,7 @@ pub use secret::{
 };
 pub use store::{KernelKeyringStore, KeyStore, KeychainStore, MemoryStore, PassphraseFileStore};
 pub use vault::{
-    EnvKind, EnvironmentInfo, HISTORY_LIMIT, Inject, Member, NewEnvironment, Operation, Recipient,
-    RecipientKind, Role, SecretMeta, SetOutcome, Vault, VaultError, VersionMeta,
+    EnvKind, EnvironmentInfo, Event, EventMeta, HISTORY_LIMIT, HistoryEntry, Inject, Member,
+    NewEnvironment, Operation, Recipient, RecipientKind, Role, SecretMeta, SetOutcome, Timeline,
+    Undone, Vault, VaultError, VersionMeta,
 };

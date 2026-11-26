@@ -123,14 +123,13 @@ fn history_lists_versions_newest_first_without_values() {
     let run = ok(m.run(&["history", "API_KEY"], None));
 
     let lines: Vec<&str> = run.stdout.lines().collect();
-    assert_eq!(lines[0], "API_KEY in payments/dev");
+    assert_eq!(
+        lines[0],
+        "API_KEY in payments/dev — current value: version 3"
+    );
     assert_eq!(listed_versions(&run.stdout), [3, 2, 1]);
     assert!(lines[1].starts_with("  3  "), "{}", run.stdout);
-    assert!(
-        lines[1].ends_with(" UTC  set     (current)"),
-        "{}",
-        run.stdout
-    );
+    assert!(lines[1].ends_with(" UTC  set"), "{}", run.stdout);
     assert!(lines[2].ends_with(" UTC  set"), "{}", run.stdout);
     assert!(lines[3].ends_with(" UTC  import"), "{}", run.stdout);
     assert!(
@@ -140,7 +139,7 @@ fn history_lists_versions_newest_first_without_values() {
     );
     assert_eq!(
         *lines.last().unwrap(),
-        "Restore the previous value: smart-env undo API_KEY"
+        "Undo the last change: smart-env undo API_KEY"
     );
     assert_no_secret(&run);
 }
@@ -161,13 +160,14 @@ fn history_with_env_flag_repeats_it_in_the_undo_hint() {
     let run = ok(m.run(&["history", "API_KEY", "--env", "payments/prod"], None));
 
     assert!(
-        run.stdout.starts_with("API_KEY in payments/prod\n"),
+        run.stdout
+            .starts_with("API_KEY in payments/prod — current value: version 2\n"),
         "{}",
         run.stdout
     );
     assert!(
         run.stdout
-            .contains("Restore the previous value: smart-env undo API_KEY --env payments/prod"),
+            .contains("Undo the last change: smart-env undo API_KEY --env payments/prod"),
         "{}",
         run.stdout
     );
@@ -206,18 +206,25 @@ fn history_of_a_missing_variable_is_not_found() {
 }
 
 #[test]
-fn history_of_a_removed_variable_points_at_undo() {
+fn history_of_a_removed_variable_shows_it_and_points_at_undo() {
     let m = project();
+    set(&m, "API_KEY", "v2");
     ok(m.run(&["rm", "API_KEY"], None));
-    let run = m.run(&["history", "API_KEY", "--json"], None);
+    let run = ok(m.run(&["history", "API_KEY"], None));
 
-    assert_eq!(run.exit, Exit::NotFound);
-    assert_eq!(error_code(&run), "secret_not_found");
-    let hint = json(&run.stdout)["error"]["hint"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert!(hint.contains("smart-env undo API_KEY"), "{hint}");
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(
+        lines[0],
+        "API_KEY in payments/dev — removed (last value: version 2)"
+    );
+    assert!(lines[1].ends_with(" UTC  removed"), "{}", run.stdout);
+    assert!(!run.stdout.contains("(current)"), "{}", run.stdout);
+    assert_eq!(listed_versions(&run.stdout), [2, 1]);
+    assert_eq!(*lines.last().unwrap(), "Restore: smart-env undo API_KEY");
+
+    let report = json(&ok(m.run(&["history", "API_KEY", "--json"], None)).stdout);
+    assert_eq!(report["removed"], true);
+    assert_eq!(report["versions"][0]["current"], false);
 }
 
 #[test]
@@ -274,11 +281,7 @@ fn history_shows_what_wrote_each_version() {
 
     let lines: Vec<&str> = run.stdout.lines().collect();
     assert_eq!(listed_versions(&run.stdout), [4, 3, 2, 1]);
-    assert!(
-        lines[1].ends_with(" UTC  set       (current)"),
-        "{}",
-        run.stdout
-    );
+    assert!(lines[1].ends_with(" UTC  set"), "{}", run.stdout);
     assert!(lines[2].ends_with(" UTC  undo → 1"), "{}", run.stdout);
     assert!(lines[3].ends_with(" UTC  set"), "{}", run.stdout);
     assert!(lines[4].ends_with(" UTC  import"), "{}", run.stdout);
@@ -299,17 +302,92 @@ fn history_json_reports_the_restored_version_of_an_undo() {
 }
 
 #[test]
-fn history_after_rm_and_undo_is_unchanged() {
+fn rm_and_undo_add_events_but_no_versions() {
     let m = project();
     set(&m, "API_KEY", "v2");
     let before = ok(m.run(&["history", "API_KEY", "--json"], None));
     ok(m.run(&["rm", "API_KEY"], None));
     ok(m.run(&["undo", "API_KEY"], None));
-    let after = ok(m.run(&["history", "API_KEY", "--json"], None));
+    let after = json(&ok(m.run(&["history", "API_KEY", "--json"], None)).stdout);
+
+    assert_eq!(after["versions"], json(&before.stdout)["versions"]);
+    assert_eq!(after["removed"], false);
+    let kinds: Vec<&str> = after["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["restore", "remove"]);
+}
+
+#[test]
+fn history_shows_rm_and_restore_above_the_current_version() {
+    let m = project();
+    set(&m, "API_KEY", "v2");
+    ok(m.run(&["rm", "API_KEY"], None));
+    ok(m.run(&["undo", "API_KEY"], None));
+    let run = ok(m.run(&["history", "API_KEY"], None));
+
+    let lines: Vec<&str> = run.stdout.lines().collect();
     assert_eq!(
-        json(&after.stdout)["versions"],
-        json(&before.stdout)["versions"]
+        lines[0],
+        "API_KEY in payments/dev — current value: version 2"
     );
+    assert!(lines[1].ends_with(" UTC  restored"), "{}", run.stdout);
+    assert!(lines[2].ends_with(" UTC  removed"), "{}", run.stdout);
+    assert!(lines[3].starts_with("  2  "), "{}", run.stdout);
+    assert!(lines[3].ends_with(" UTC  set"), "{}", run.stdout);
+    // Event lines leave the version column empty.
+    assert!(lines[1].starts_with("     2"), "{}", run.stdout);
+}
+
+#[test]
+fn history_follows_a_renamed_variable() {
+    let m = project();
+    ok(m.run(&["rename", "API_KEY", "STRIPE_KEY"], None));
+    set(&m, "STRIPE_KEY", "v2-hunter2");
+    let run = ok(m.run(&["history", "STRIPE_KEY"], None));
+
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(
+        lines[0],
+        "STRIPE_KEY in payments/dev — current value: version 2"
+    );
+    assert!(lines[1].starts_with("  2  "), "{}", run.stdout);
+    assert!(
+        lines[2].ends_with(" UTC  renamed API_KEY → STRIPE_KEY"),
+        "{}",
+        run.stdout
+    );
+    assert!(lines[3].ends_with(" UTC  import"), "{}", run.stdout);
+    assert_no_secret(&run);
+
+    let old = m.run(&["history", "API_KEY", "--json"], None);
+    assert_eq!(error_code(&old), "secret_not_found");
+}
+
+#[test]
+fn history_json_lists_events_without_values() {
+    let m = project();
+    ok(m.run(&["rename", "API_KEY", "STRIPE_KEY"], None));
+    ok(m.run(&["rm", "STRIPE_KEY"], None));
+    let run = ok(m.run(&["history", "STRIPE_KEY", "--json"], None));
+
+    let report = json(&run.stdout);
+    assert_eq!(report["removed"], true);
+    let events = report["events"].as_array().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["kind"], "remove");
+    assert_eq!(events[0]["after_version"], 1);
+    assert!(events[0]["from"].is_null() && events[0]["to"].is_null());
+    assert_eq!(events[1]["kind"], "rename");
+    assert_eq!(events[1]["from"], "API_KEY");
+    assert_eq!(events[1]["to"], "STRIPE_KEY");
+    for event in events {
+        assert!(is_timestamp(event["at"].as_str().unwrap()), "{event}");
+    }
+    assert_no_secret(&run);
 }
 
 // --- undo ---
@@ -558,4 +636,346 @@ fn values_never_reach_the_output_of_history_or_undo() {
     for run in &runs {
         assert_no_secret(run);
     }
+}
+
+// --- undo --to: a chosen version ---
+
+/// `dev/API_KEY` at version 3: `dev-hunter2` (import), `v2-hunter2`,
+/// `v3-hunter2`.
+fn three_versions() -> Machine {
+    let m = project();
+    set(&m, "API_KEY", "v2-hunter2");
+    set(&m, "API_KEY", "v3-hunter2");
+    m
+}
+
+#[test]
+fn undo_to_restores_the_chosen_version_as_a_new_one() {
+    let m = three_versions();
+    let before = revision(&m, "dev");
+    let run = ok(m.run(&["undo", "API_KEY", "--to", "1"], None));
+
+    assert_eq!(value(&m, "dev", "API_KEY").as_deref(), Some("dev-hunter2"));
+    assert_eq!(meta(&m, "dev", "API_KEY").unwrap().version, 4);
+    assert_eq!(revision(&m, "dev"), before + 1);
+    assert!(
+        run.stdout
+            .contains("✓ API_KEY restored to version 1 in payments/dev (saved as version 4)"),
+        "{}",
+        run.stdout
+    );
+    assert_no_secret(&run);
+
+    let history = ok(m.run(&["history", "API_KEY"], None));
+    assert!(
+        history.stdout.lines().nth(1).unwrap().contains("undo → 1"),
+        "{}",
+        history.stdout
+    );
+}
+
+#[test]
+fn undo_after_undo_to_goes_back_to_the_value_before_it() {
+    let m = three_versions();
+    ok(m.run(&["undo", "API_KEY", "--to", "1"], None));
+    let run = ok(m.run(&["undo", "API_KEY"], None));
+
+    assert_eq!(value(&m, "dev", "API_KEY").as_deref(), Some("v3-hunter2"));
+    assert!(
+        run.stdout
+            .contains("✓ API_KEY restored to version 3 in payments/dev (saved as version 5)"),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn undo_to_the_current_version_is_nothing_to_undo() {
+    let m = three_versions();
+    let before = revision(&m, "dev");
+    let run = m.run(&["undo", "API_KEY", "--to", "3", "--json"], None);
+
+    assert_eq!(run.exit, Exit::NotFound);
+    assert_eq!(error_code(&run), "nothing_to_undo");
+    assert_eq!(revision(&m, "dev"), before);
+}
+
+#[test]
+fn undo_to_a_version_not_in_the_history_points_at_history() {
+    let m = three_versions();
+    let run = m.run(&["undo", "API_KEY", "--to", "9", "--json"], None);
+
+    assert_eq!(run.exit, Exit::NotFound);
+    assert_eq!(error_code(&run), "version_not_found");
+    let hint = json(&run.stdout)["error"]["hint"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(hint.contains("smart-env history API_KEY"), "{hint}");
+}
+
+#[test]
+fn undo_to_needs_a_positive_number() {
+    let m = three_versions();
+    for to in ["0", "-1", "two", ""] {
+        let run = m.run(&["undo", "API_KEY", "--to", to, "--json"], None);
+        assert_eq!(run.exit, Exit::Usage, "{to:?}");
+        assert_eq!(error_code(&run), "usage", "{to:?}");
+    }
+    assert_eq!(meta(&m, "dev", "API_KEY").unwrap().version, 3);
+}
+
+#[test]
+fn undo_to_on_a_removed_variable_points_at_plain_undo() {
+    let m = three_versions();
+    ok(m.run(&["rm", "API_KEY"], None));
+    let run = m.run(&["undo", "API_KEY", "--to", "1", "--json"], None);
+
+    assert_eq!(run.exit, Exit::NotFound);
+    assert_eq!(error_code(&run), "secret_not_found");
+    let hint = json(&run.stdout)["error"]["hint"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(hint.contains("smart-env undo API_KEY"), "{hint}");
+    assert!(!hint.contains("--to"), "{hint}");
+    assert!(meta(&m, "dev", "API_KEY").is_none());
+}
+
+#[test]
+fn undo_to_with_a_locked_key_changes_nothing() {
+    let m = locked_project();
+    let before = revision(&m, "dev");
+    let run = m.run(&["undo", "API_KEY", "--to", "1", "--json"], None);
+
+    assert_eq!(run.exit, Exit::Access);
+    assert_eq!(error_code(&run), "key_locked");
+    assert_eq!(revision(&m, "dev"), before);
+}
+
+#[test]
+fn undo_to_with_env_flag_works_in_that_environment() {
+    let m = three_versions();
+    set_env(&m, "prod", "API_KEY", "p2");
+    set_env(&m, "prod", "API_KEY", "p3");
+    ok(m.run(
+        &["undo", "API_KEY", "--to", "1", "--env", "payments/prod"],
+        None,
+    ));
+
+    assert_eq!(
+        value(&m, "prod", "API_KEY").as_deref(),
+        Some("prod-hunter2")
+    );
+    assert_eq!(value(&m, "dev", "API_KEY").as_deref(), Some("v3-hunter2"));
+}
+
+#[test]
+fn undo_to_json_reports_the_restored_version() {
+    let m = three_versions();
+    let run = ok(m.run(&["undo", "API_KEY", "--to", "2", "--json"], None));
+
+    let report = json(&run.stdout);
+    assert_eq!(report["status"], "restored");
+    assert_eq!(report["name"], "API_KEY");
+    assert_eq!(report["version"], 4);
+    assert_eq!(report["restored_version"], 2);
+    assert_eq!(report["was_removed"], false);
+    assert_no_secret(&run);
+}
+
+// --- undo undoes the last change, whatever it was ---
+
+#[test]
+fn history_marks_no_line_as_current() {
+    let m = project();
+    set(&m, "API_KEY", "v2");
+    let run = ok(m.run(&["history", "API_KEY"], None));
+    assert!(!run.stdout.contains("(current)"), "{}", run.stdout);
+}
+
+#[test]
+fn rename_points_at_undo() {
+    let m = project();
+    let run = ok(m.run(&["rename", "API_KEY", "STRIPE_KEY"], None));
+    assert!(
+        run.stdout.contains(
+            "✓ Renamed API_KEY to STRIPE_KEY in payments/dev (undo: smart-env undo STRIPE_KEY)"
+        ),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn history_after_a_rename_points_at_undo_even_with_one_version() {
+    let m = project();
+    ok(m.run(&["rename", "API_KEY", "STRIPE_KEY"], None));
+    let run = ok(m.run(&["history", "STRIPE_KEY"], None));
+    assert_eq!(
+        run.stdout.lines().last().unwrap(),
+        "Undo the last change: smart-env undo STRIPE_KEY"
+    );
+}
+
+#[test]
+fn undo_after_rename_renames_back_and_keeps_the_value() {
+    let m = project();
+    set(&m, "API_KEY", "v2-hunter2");
+    ok(m.run(&["rename", "API_KEY", "STRIPE_KEY"], None));
+    let run = ok(m.run(&["undo", "STRIPE_KEY"], None));
+
+    assert!(
+        run.stdout
+            .contains("✓ Undid rename: STRIPE_KEY is API_KEY again in payments/dev"),
+        "{}",
+        run.stdout
+    );
+    assert!(meta(&m, "dev", "STRIPE_KEY").is_none());
+    assert_eq!(meta(&m, "dev", "API_KEY").unwrap().version, 2);
+    assert_eq!(value(&m, "dev", "API_KEY").as_deref(), Some("v2-hunter2"));
+    assert_no_secret(&run);
+}
+
+#[test]
+fn second_undo_after_rename_redoes_it() {
+    let m = project();
+    ok(m.run(&["rename", "API_KEY", "STRIPE_KEY"], None));
+    ok(m.run(&["undo", "STRIPE_KEY"], None));
+    let run = ok(m.run(&["undo", "API_KEY"], None));
+
+    assert!(
+        run.stdout
+            .contains("✓ Undid rename: API_KEY is STRIPE_KEY again in payments/dev"),
+        "{}",
+        run.stdout
+    );
+    assert!(meta(&m, "dev", "STRIPE_KEY").is_some());
+}
+
+#[test]
+fn undo_after_rename_and_set_undoes_the_value() {
+    let m = project();
+    ok(m.run(&["rename", "API_KEY", "STRIPE_KEY"], None));
+    set(&m, "STRIPE_KEY", "v2");
+    let run = ok(m.run(&["undo", "STRIPE_KEY"], None));
+
+    assert!(
+        run.stdout
+            .contains("✓ STRIPE_KEY restored to version 1 in payments/dev (saved as version 3)"),
+        "{}",
+        run.stdout
+    );
+    assert_eq!(
+        value(&m, "dev", "STRIPE_KEY").as_deref(),
+        Some("dev-hunter2")
+    );
+}
+
+#[test]
+fn undo_of_a_rename_onto_a_name_taken_meanwhile_is_a_conflict() {
+    let m = project();
+    ok(m.run(&["rename", "API_KEY", "STRIPE_KEY"], None));
+    set(&m, "API_KEY", "new");
+    let before = revision(&m, "dev");
+    let run = m.run(&["undo", "STRIPE_KEY", "--json"], None);
+
+    assert_eq!(run.exit, Exit::Conflict);
+    assert_eq!(error_code(&run), "secret_name_taken");
+    assert_eq!(revision(&m, "dev"), before);
+    assert!(meta(&m, "dev", "STRIPE_KEY").is_some());
+}
+
+#[test]
+fn undo_after_restore_removes_again() {
+    let m = project();
+    ok(m.run(&["rm", "API_KEY"], None));
+    ok(m.run(&["undo", "API_KEY"], None));
+    let run = ok(m.run(&["undo", "API_KEY"], None));
+
+    assert!(
+        run.stdout.contains(
+            "✓ Undid restore: API_KEY removed again from payments/dev (undo: smart-env undo API_KEY)"
+        ),
+        "{}",
+        run.stdout
+    );
+    assert!(meta(&m, "dev", "API_KEY").is_none());
+}
+
+#[test]
+fn undo_by_the_old_name_after_rename_points_at_the_new_name() {
+    let m = project();
+    ok(m.run(&["rename", "API_KEY", "STRIPE_KEY"], None));
+    let run = m.run(&["undo", "API_KEY", "--json"], None);
+
+    assert_eq!(run.exit, Exit::NotFound);
+    assert_eq!(error_code(&run), "secret_not_found");
+    let error = &json(&run.stdout)["error"];
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("API_KEY was renamed to STRIPE_KEY"),
+        "{error}"
+    );
+    assert!(
+        error["hint"]
+            .as_str()
+            .unwrap()
+            .contains("smart-env undo STRIPE_KEY"),
+        "{error}"
+    );
+    assert!(meta(&m, "dev", "STRIPE_KEY").is_some(), "nothing changed");
+}
+
+#[test]
+fn history_by_the_old_name_after_rename_points_at_the_new_name() {
+    let m = project();
+    ok(m.run(&["rename", "API_KEY", "STRIPE_KEY"], None));
+    let run = m.run(&["history", "API_KEY", "--json"], None);
+
+    assert_eq!(error_code(&run), "secret_not_found");
+    let hint = json(&run.stdout)["error"]["hint"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(hint.contains("smart-env history STRIPE_KEY"), "{hint}");
+}
+
+#[test]
+fn undo_of_a_rename_with_a_locked_key_changes_nothing() {
+    let m = locked_project();
+    ok(m.run(&["rename", "API_KEY", "STRIPE_KEY"], None));
+    let run = m.run(&["undo", "STRIPE_KEY", "--json"], None);
+
+    assert_eq!(error_code(&run), "key_locked");
+    assert!(meta(&m, "dev", "STRIPE_KEY").is_some());
+}
+
+#[test]
+fn undo_json_says_what_was_undone() {
+    let m = project();
+    set(&m, "API_KEY", "v2");
+    let value = json(&ok(m.run(&["undo", "API_KEY", "--json"], None)).stdout);
+    assert_eq!(value["status"], "restored");
+    assert_eq!(value["undone"], "value");
+    assert_eq!(value["restored_version"], 1);
+
+    ok(m.run(&["rename", "API_KEY", "STRIPE_KEY"], None));
+    let rename = json(&ok(m.run(&["undo", "STRIPE_KEY", "--json"], None)).stdout);
+    assert_eq!(rename["status"], "renamed");
+    assert_eq!(rename["undone"], "rename");
+    assert_eq!(rename["from"], "STRIPE_KEY");
+    assert_eq!(rename["to"], "API_KEY");
+
+    ok(m.run(&["rm", "API_KEY"], None));
+    let removal = json(&ok(m.run(&["undo", "API_KEY", "--json"], None)).stdout);
+    assert_eq!(removal["status"], "restored");
+    assert_eq!(removal["undone"], "remove");
+    assert_eq!(removal["was_removed"], true);
+
+    let restore = json(&ok(m.run(&["undo", "API_KEY", "--json"], None)).stdout);
+    assert_eq!(restore["status"], "removed");
+    assert_eq!(restore["undone"], "restore");
 }

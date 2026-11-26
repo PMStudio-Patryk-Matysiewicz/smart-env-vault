@@ -1,9 +1,9 @@
 use rusqlite::{Connection, params};
 use smart_env_vault::{
-    AccountId, Dek, DeviceKey, EnvKind, EnvironmentId, EnvironmentInfo, HISTORY_LIMIT, Inject,
-    KeyError, Member, NewEnvironment, Operation, ProjectId, PublicKey, Recipient, RecipientId,
-    RecipientKind, RecoveryKey, Role, SecretError, SecretMeta, SecretValue, SetOutcome, Unwrapper,
-    VarName, Vault, VaultError, WrappedDek,
+    AccountId, Dek, DeviceKey, EnvKind, EnvironmentId, EnvironmentInfo, Event, HISTORY_LIMIT,
+    HistoryEntry, Inject, KeyError, Member, NewEnvironment, Operation, ProjectId, PublicKey,
+    Recipient, RecipientId, RecipientKind, RecoveryKey, Role, SecretError, SecretMeta, SecretValue,
+    SetOutcome, Timeline, Undone, Unwrapper, VarName, Vault, VaultError, WrappedDek,
 };
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -1862,9 +1862,9 @@ fn v1_env(vault: &Vault) -> EnvironmentId {
 }
 
 #[test]
-fn new_vault_has_schema_version_2() {
+fn new_vault_has_schema_version_3() {
     let f = setup();
-    assert_eq!(user_version(&f.path), 2);
+    assert_eq!(user_version(&f.path), 3);
 }
 
 #[test]
@@ -1873,7 +1873,7 @@ fn opening_a_v1_vault_upgrades_it_and_keeps_every_value() {
     assert_eq!(user_version(&path), 1, "fixture is version 1");
 
     let mut vault = Vault::open(&path).unwrap();
-    assert_eq!(user_version(&path), 2);
+    assert_eq!(user_version(&path), 3);
 
     let env = v1_env(&vault);
     let key = DeviceKey::from_seed([7; 32]);
@@ -1901,7 +1901,7 @@ fn upgraded_vault_records_operations_from_then_on() {
     assert_eq!(
         ops_in(&vault, env, "A"),
         [
-            (4, Operation::Undo { restored: 3 }),
+            (4, Operation::Undo { restored: 2 }),
             (3, Operation::Set),
             (2, Operation::Unknown),
             (1, Operation::Unknown),
@@ -1909,7 +1909,7 @@ fn upgraded_vault_records_operations_from_then_on() {
     );
     assert_eq!(
         vault.get(env, &name("A"), &key).unwrap().unwrap().expose(),
-        "a3"
+        "a2"
     );
 
     drop(vault);
@@ -1934,9 +1934,588 @@ fn undo_onto_an_unknown_version_records_the_restored_version() {
 #[test]
 fn unknown_future_schema_version_is_still_refused() {
     let (_dir, path) = v1_copy();
-    raw(&path).pragma_update(None, "user_version", 3).unwrap();
+    raw(&path).pragma_update(None, "user_version", 4).unwrap();
     assert!(matches!(
         err(Vault::open(&path)),
         VaultError::UnsupportedSchema
     ));
+}
+
+// --- restore: undo to a chosen version (undo --to) -------------------------------
+
+#[test]
+fn restore_writes_the_chosen_version_as_a_new_version() {
+    let mut f = setup();
+    for text in ["a1", "a2", "a3"] {
+        put(&mut f, "A", text);
+    }
+    let before = revision(&f);
+
+    assert_eq!(f.vault.restore(f.env, &name("A"), 1, &f.device).unwrap(), 4);
+    assert_eq!(read(&f, "A").as_deref(), Some("a1"));
+    assert_eq!(ops(&f, "A")[0], (4, Operation::Undo { restored: 1 }));
+    assert_eq!(versions(&f, "A"), [4, 3, 2, 1]);
+    assert_eq!(revision(&f), before + 1);
+}
+
+#[test]
+fn restore_of_an_older_version_reads_it_with_its_own_aad() {
+    let mut f = setup();
+    for text in ["a1", "a2", "a3", "a4"] {
+        put(&mut f, "A", text);
+    }
+    f.vault.restore(f.env, &name("A"), 2, &f.device).unwrap();
+    assert_eq!(read(&f, "A").as_deref(), Some("a2"));
+}
+
+#[test]
+fn undo_after_restore_brings_back_the_value_before_it() {
+    let mut f = setup();
+    for text in ["a1", "a2", "a3"] {
+        put(&mut f, "A", text);
+    }
+    f.vault.restore(f.env, &name("A"), 1, &f.device).unwrap();
+    f.vault.undo(f.env, &name("A"), &f.device).unwrap();
+    assert_eq!(read(&f, "A").as_deref(), Some("a3"));
+}
+
+#[test]
+fn restore_to_the_current_version_is_nothing_to_undo() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    put(&mut f, "A", "a2");
+    let result = f.vault.restore(f.env, &name("A"), 2, &f.device);
+    assert!(matches!(err(result), VaultError::NothingToUndo));
+    assert_eq!(revision(&f), 2);
+}
+
+#[test]
+fn restore_to_a_version_not_in_the_history_is_version_not_found() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    put(&mut f, "A", "a2");
+    for version in [0, 3, 99] {
+        let result = f.vault.restore(f.env, &name("A"), version, &f.device);
+        assert!(
+            matches!(err(result), VaultError::VersionNotFound),
+            "{version}"
+        );
+    }
+    assert_eq!(revision(&f), 2);
+}
+
+#[test]
+fn restore_beyond_the_history_limit_is_version_not_found() {
+    let mut f = setup();
+    for i in 0..HISTORY_LIMIT + 2 {
+        put(&mut f, "A", &format!("v{i}"));
+    }
+    let result = f.vault.restore(f.env, &name("A"), 1, &f.device);
+    assert!(matches!(err(result), VaultError::VersionNotFound));
+}
+
+#[test]
+fn restore_of_a_removed_or_missing_secret_is_not_found() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    put(&mut f, "A", "a2");
+    f.vault.remove(f.env, &name("A")).unwrap();
+    for var in ["A", "NOPE"] {
+        let result = f.vault.restore(f.env, &name(var), 1, &f.device);
+        assert!(matches!(err(result), VaultError::SecretNotFound), "{var}");
+    }
+}
+
+#[test]
+fn restore_with_a_wrong_key_changes_nothing() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    put(&mut f, "A", "a2");
+    let result = f
+        .vault
+        .restore(f.env, &name("A"), 1, &DeviceKey::generate());
+    assert!(matches!(err(result), VaultError::Key(KeyError::Unwrap)));
+    assert_eq!(read(&f, "A").as_deref(), Some("a2"));
+    assert_eq!(versions(&f, "A"), [2, 1]);
+    assert_eq!(revision(&f), 2);
+}
+
+#[test]
+fn restore_keeps_inject() {
+    let mut f = setup();
+    put_with(&mut f, "A", "a1", Some(Inject::Run));
+    put(&mut f, "A", "a2");
+    f.vault.restore(f.env, &name("A"), 1, &f.device).unwrap();
+    assert_eq!(inject_of(&f, "A"), Inject::Run);
+}
+
+#[test]
+fn restore_in_an_unknown_environment_is_not_found() {
+    let mut f = setup();
+    let result = f
+        .vault
+        .restore(EnvironmentId::new(), &name("A"), 1, &f.device);
+    assert!(matches!(err(result), VaultError::EnvironmentNotFound));
+}
+
+// --- timeline: versions and events (rename, remove, restore) ---------------------
+
+fn timeline(f: &Fixture, var: &str) -> Timeline {
+    f.vault.timeline(f.env, &name(var)).unwrap()
+}
+
+/// Entries without timestamps: `V(version, operation)` or `E(after, event)`.
+#[derive(Debug, PartialEq)]
+enum Line {
+    V(u32, Operation),
+    E(u32, Event),
+}
+
+fn lines(timeline: &Timeline) -> Vec<Line> {
+    timeline
+        .entries
+        .iter()
+        .map(|entry| match entry {
+            HistoryEntry::Version(meta) => Line::V(meta.version, meta.operation),
+            HistoryEntry::Event(meta) => Line::E(meta.after_version, meta.event.clone()),
+        })
+        .collect()
+}
+
+fn renamed(from: &str, to: &str) -> Event {
+    Event::Rename {
+        from: name(from),
+        to: name(to),
+    }
+}
+
+#[test]
+fn timeline_without_events_lists_the_versions() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    put(&mut f, "A", "a2");
+    let t = timeline(&f, "A");
+    assert!(!t.removed);
+    assert_eq!(
+        lines(&t),
+        [Line::V(2, Operation::Set), Line::V(1, Operation::Set)]
+    );
+}
+
+#[test]
+fn rename_is_recorded_between_the_versions() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    f.vault.rename(f.env, &name("A"), &name("B")).unwrap();
+    put(&mut f, "B", "b2");
+    assert_eq!(
+        lines(&timeline(&f, "B")),
+        [
+            Line::V(2, Operation::Set),
+            Line::E(1, renamed("A", "B")),
+            Line::V(1, Operation::Set),
+        ]
+    );
+}
+
+#[test]
+fn several_renames_are_listed_newest_first() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    f.vault.rename(f.env, &name("A"), &name("B")).unwrap();
+    f.vault.rename(f.env, &name("B"), &name("C")).unwrap();
+    assert_eq!(
+        lines(&timeline(&f, "C")),
+        [
+            Line::E(1, renamed("B", "C")),
+            Line::E(1, renamed("A", "B")),
+            Line::V(1, Operation::Set),
+        ]
+    );
+}
+
+#[test]
+fn remove_and_restore_are_recorded() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    f.vault.remove(f.env, &name("A")).unwrap();
+
+    let removed = timeline(&f, "A");
+    assert!(removed.removed);
+    assert_eq!(
+        lines(&removed),
+        [Line::E(1, Event::Remove), Line::V(1, Operation::Set)]
+    );
+
+    f.vault.undo(f.env, &name("A"), &f.device).unwrap();
+    let restored = timeline(&f, "A");
+    assert!(!restored.removed);
+    assert_eq!(
+        lines(&restored),
+        [
+            Line::E(1, Event::Restore),
+            Line::E(1, Event::Remove),
+            Line::V(1, Operation::Set),
+        ]
+    );
+}
+
+#[test]
+fn set_on_a_removed_name_shows_the_removal_before_the_new_version() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    f.vault.remove(f.env, &name("A")).unwrap();
+    put(&mut f, "A", "a2");
+    assert_eq!(
+        lines(&timeline(&f, "A")),
+        [
+            Line::V(2, Operation::Set),
+            Line::E(1, Event::Remove),
+            Line::V(1, Operation::Set),
+        ]
+    );
+}
+
+#[test]
+fn event_timestamps_are_utc_text() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    f.vault.remove(f.env, &name("A")).unwrap();
+    let HistoryEntry::Event(meta) = &timeline(&f, "A").entries[0] else {
+        panic!("event first");
+    };
+    assert_eq!(meta.at.len(), 19, "{}", meta.at);
+}
+
+#[test]
+fn failed_changes_record_no_event() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    put(&mut f, "B", "b1");
+    assert!(f.vault.rename(f.env, &name("A"), &name("B")).is_err());
+    assert!(f.vault.rename(f.env, &name("NOPE"), &name("C")).is_err());
+    assert!(!f.vault.remove(f.env, &name("NOPE")).unwrap());
+    assert_eq!(lines(&timeline(&f, "A")), [Line::V(1, Operation::Set)]);
+    assert_eq!(event_rows(&f.path), 0);
+}
+
+#[test]
+fn timeline_under_the_old_name_is_not_found() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    f.vault.rename(f.env, &name("A"), &name("B")).unwrap();
+    assert!(matches!(
+        err(f.vault.timeline(f.env, &name("A"))),
+        VaultError::SecretNotFound
+    ));
+}
+
+#[test]
+fn timeline_of_a_missing_secret_or_environment_is_not_found() {
+    let f = setup();
+    assert!(matches!(
+        err(f.vault.timeline(f.env, &name("NOPE"))),
+        VaultError::SecretNotFound
+    ));
+    assert!(matches!(
+        err(f.vault.timeline(EnvironmentId::new(), &name("A"))),
+        VaultError::EnvironmentNotFound
+    ));
+}
+
+fn event_rows(path: &Path) -> i64 {
+    raw(path)
+        .query_row("SELECT count(*) FROM secret_events", [], |row| row.get(0))
+        .unwrap()
+}
+
+#[test]
+fn purge_deletes_the_events_too() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    f.vault.rename(f.env, &name("A"), &name("B")).unwrap();
+    f.vault.remove(f.env, &name("B")).unwrap();
+    assert_eq!(event_rows(&f.path), 2);
+    assert!(f.vault.purge(f.env, &name("B")).unwrap());
+    assert_eq!(event_rows(&f.path), 0);
+}
+
+#[test]
+fn events_never_hold_values() {
+    let mut f = setup();
+    put(&mut f, "A", "hunter2-value");
+    f.vault.rename(f.env, &name("A"), &name("B")).unwrap();
+    f.vault.remove(f.env, &name("B")).unwrap();
+    let bytes = std::fs::read(&f.path).unwrap();
+    assert!(
+        !bytes
+            .windows(b"hunter2-value".len())
+            .any(|w| w == b"hunter2-value")
+    );
+}
+
+// --- schema version 2 -> 3 (events) ----------------------------------------------
+
+/// Vault written by schema version 2: device key from seed `[7; 32]`,
+/// project `payments`, environment `dev`, `A` at version 3 (`a1` set, `a2`
+/// set, undo to 1), `B` (`b1`) removed.
+const VAULT_V2: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/vault-v2.db");
+
+#[test]
+fn opening_a_v2_vault_upgrades_it_keeping_operations() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("vault.db");
+    std::fs::copy(VAULT_V2, &path).unwrap();
+    assert_eq!(user_version(&path), 2, "fixture is version 2");
+
+    let mut vault = Vault::open(&path).unwrap();
+    assert_eq!(user_version(&path), 3);
+    let env = v1_env(&vault);
+    let key = DeviceKey::from_seed([7; 32]);
+
+    let a = vault.timeline(env, &name("A")).unwrap();
+    assert_eq!(
+        lines(&a),
+        [
+            Line::V(3, Operation::Undo { restored: 1 }),
+            Line::V(2, Operation::Set),
+            Line::V(1, Operation::Set),
+        ]
+    );
+    let b = vault.timeline(env, &name("B")).unwrap();
+    assert!(b.removed, "removed before events were recorded");
+    assert_eq!(lines(&b), [Line::V(1, Operation::Set)]);
+
+    vault.rename(env, &name("A"), &name("C")).unwrap();
+    assert_eq!(
+        lines(&vault.timeline(env, &name("C")).unwrap())[0],
+        Line::E(3, renamed("A", "C"))
+    );
+    assert_eq!(
+        vault.get(env, &name("C"), &key).unwrap().unwrap().expose(),
+        "a1"
+    );
+}
+
+#[test]
+fn opening_a_v1_vault_upgrades_it_all_the_way_with_events() {
+    let (_dir, path) = v1_copy();
+    let mut vault = Vault::open(&path).unwrap();
+    let env = v1_env(&vault);
+    vault.remove(env, &name("A")).unwrap();
+    assert_eq!(
+        lines(&vault.timeline(env, &name("A")).unwrap()),
+        [
+            Line::E(2, Event::Remove),
+            Line::V(2, Operation::Unknown),
+            Line::V(1, Operation::Unknown),
+        ]
+    );
+}
+
+// --- undo_last: undo the newest change on the timeline ---------------------------
+
+fn undo_last(f: &mut Fixture, var: &str) -> Undone {
+    f.vault.undo_last(f.env, &name(var), &f.device).unwrap()
+}
+
+fn live_names(f: &Fixture) -> Vec<String> {
+    f.vault
+        .list(f.env)
+        .unwrap()
+        .into_iter()
+        .map(|meta| meta.name.to_string())
+        .collect()
+}
+
+#[test]
+fn undo_last_of_a_value_change_restores_the_previous_value() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    put(&mut f, "A", "a2");
+    assert_eq!(
+        undo_last(&mut f, "A"),
+        Undone::Value {
+            version: 3,
+            restored: 1
+        }
+    );
+    assert_eq!(read(&f, "A").as_deref(), Some("a1"));
+}
+
+#[test]
+fn undo_last_of_a_rename_renames_back_and_keeps_the_value() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    put(&mut f, "A", "a2");
+    f.vault.rename(f.env, &name("A"), &name("B")).unwrap();
+    let before = revision(&f);
+
+    assert_eq!(
+        undo_last(&mut f, "B"),
+        Undone::Rename {
+            from: name("B"),
+            to: name("A")
+        }
+    );
+    assert_eq!(live_names(&f), ["A"]);
+    assert_eq!(read(&f, "A").as_deref(), Some("a2"));
+    assert_eq!(versions(&f, "A"), [2, 1], "no new version");
+    assert_eq!(revision(&f), before + 1);
+    assert_eq!(
+        lines(&timeline(&f, "A"))[..2],
+        [Line::E(2, renamed("B", "A")), Line::E(2, renamed("A", "B"))]
+    );
+}
+
+#[test]
+fn second_undo_last_redoes_the_rename() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    f.vault.rename(f.env, &name("A"), &name("B")).unwrap();
+    undo_last(&mut f, "B");
+    assert_eq!(
+        undo_last(&mut f, "A"),
+        Undone::Rename {
+            from: name("A"),
+            to: name("B")
+        }
+    );
+    assert_eq!(live_names(&f), ["B"]);
+}
+
+#[test]
+fn undo_last_after_rename_and_set_undoes_the_value_and_keeps_the_name() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    f.vault.rename(f.env, &name("A"), &name("B")).unwrap();
+    put(&mut f, "B", "b2");
+    assert_eq!(
+        undo_last(&mut f, "B"),
+        Undone::Value {
+            version: 3,
+            restored: 1
+        }
+    );
+    assert_eq!(live_names(&f), ["B"]);
+    assert_eq!(read(&f, "B").as_deref(), Some("a1"));
+}
+
+#[test]
+fn undo_last_of_a_removal_brings_the_secret_back() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    put(&mut f, "A", "a2");
+    f.vault.remove(f.env, &name("A")).unwrap();
+    assert_eq!(undo_last(&mut f, "A"), Undone::Removal { version: 2 });
+    assert_eq!(read(&f, "A").as_deref(), Some("a2"));
+}
+
+#[test]
+fn undo_last_of_a_restore_removes_again() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    f.vault.remove(f.env, &name("A")).unwrap();
+    undo_last(&mut f, "A");
+    assert_eq!(undo_last(&mut f, "A"), Undone::Restore);
+
+    assert!(live_names(&f).is_empty());
+    let t = timeline(&f, "A");
+    assert!(t.removed);
+    assert_eq!(
+        lines(&t)[..3],
+        [
+            Line::E(1, Event::Remove),
+            Line::E(1, Event::Restore),
+            Line::E(1, Event::Remove)
+        ]
+    );
+}
+
+#[test]
+fn undo_last_of_a_rename_onto_a_name_taken_meanwhile_changes_nothing() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    f.vault.rename(f.env, &name("A"), &name("B")).unwrap();
+    put(&mut f, "A", "new");
+    let before = revision(&f);
+
+    let result = f.vault.undo_last(f.env, &name("B"), &f.device);
+    assert!(matches!(err(result), VaultError::SecretNameTaken));
+    assert_eq!(live_names(&f), ["A", "B"]);
+    assert_eq!(revision(&f), before);
+    assert_eq!(lines(&timeline(&f, "B"))[0], Line::E(1, renamed("A", "B")));
+}
+
+#[test]
+fn undo_last_with_a_wrong_key_changes_nothing_even_for_a_rename() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    f.vault.rename(f.env, &name("A"), &name("B")).unwrap();
+    let before = revision(&f);
+
+    let result = f.vault.undo_last(f.env, &name("B"), &DeviceKey::generate());
+    assert!(matches!(err(result), VaultError::Key(KeyError::Unwrap)));
+    assert_eq!(live_names(&f), ["B"]);
+    assert_eq!(revision(&f), before);
+}
+
+#[test]
+fn undo_last_with_a_single_version_and_no_events_is_nothing_to_undo() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    let result = f.vault.undo_last(f.env, &name("A"), &f.device);
+    assert!(matches!(err(result), VaultError::NothingToUndo));
+}
+
+#[test]
+fn undo_last_of_a_missing_secret_is_not_found() {
+    let mut f = setup();
+    let result = f.vault.undo_last(f.env, &name("NOPE"), &f.device);
+    assert!(matches!(err(result), VaultError::SecretNotFound));
+}
+
+#[test]
+fn undo_last_brings_back_a_secret_removed_before_events_were_recorded() {
+    let (_dir, path) = v1_copy();
+    let mut vault = Vault::open(&path).unwrap();
+    let env = v1_env(&vault);
+    let key = DeviceKey::from_seed([7; 32]);
+    assert_eq!(
+        vault.undo_last(env, &name("B"), &key).unwrap(),
+        Undone::Removal { version: 1 }
+    );
+}
+
+#[test]
+fn renamed_to_finds_the_current_name_of_a_renamed_secret() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    assert_eq!(f.vault.renamed_to(f.env, &name("A")).unwrap(), None);
+
+    f.vault.rename(f.env, &name("A"), &name("B")).unwrap();
+    f.vault.rename(f.env, &name("B"), &name("C")).unwrap();
+    assert_eq!(
+        f.vault.renamed_to(f.env, &name("A")).unwrap(),
+        Some(name("C"))
+    );
+    assert_eq!(
+        f.vault.renamed_to(f.env, &name("B")).unwrap(),
+        Some(name("C"))
+    );
+
+    f.vault.rename(f.env, &name("C"), &name("A")).unwrap();
+    assert_eq!(f.vault.renamed_to(f.env, &name("A")).unwrap(), None);
+}
+
+#[test]
+fn renamed_to_is_per_environment() {
+    let mut f = setup();
+    put(&mut f, "A", "a1");
+    f.vault.rename(f.env, &name("A"), &name("B")).unwrap();
+    let other = f
+        .vault
+        .create_environment(f.project, "prod", EnvKind::Prod)
+        .unwrap();
+    assert_eq!(f.vault.renamed_to(other, &name("A")).unwrap(), None);
 }

@@ -9,7 +9,10 @@ use std::io::{Read, Write};
 
 use secrecy::ExposeSecret;
 use serde_json::json;
-use smart_env_vault::{Inject, MAX_VALUE_LEN, SecretError, SecretValue, VarName, VaultError};
+use smart_env_vault::{
+    EnvironmentId, Event, EventMeta, HistoryEntry, Inject, MAX_VALUE_LEN, Operation, SecretError,
+    SecretValue, Undone, VarName, Vault, VaultError, VersionMeta,
+};
 use zeroize::Zeroizing;
 
 use crate::keys::device_key;
@@ -228,7 +231,12 @@ pub(crate) fn rename(
         );
     } else {
         print_warnings(out, &warnings);
-        let _ = writeln!(out, "✓ Renamed {from} to {to} in {}", target.label());
+        let _ = writeln!(
+            out,
+            "✓ Renamed {from} to {to} in {} (undo: smart-env undo {to}{})",
+            target.label(),
+            env_flag(env)
+        );
     }
     Ok(Exit::Success)
 }
@@ -244,26 +252,71 @@ pub(crate) fn history(
 ) -> Result<Exit, CliError> {
     let name = parse_name(name)?;
     let (vault, target) = target::resolve(ctx, env)?;
-    let versions = vault
-        .history(target.environment.id, &name)
+    let timeline = vault
+        .timeline(target.environment.id, &name)
         .map_err(|error| match error {
-            VaultError::SecretNotFound => CliError::from(error).with_hint(format!(
-                "List variables: smart-env ls — a removed variable comes back with: smart-env undo {name}{}",
-                env_flag(env)
-            )),
+            VaultError::SecretNotFound => {
+                renamed_hint(&vault, target.environment.id, &name, "history", env)
+                    .unwrap_or_else(|| error.into())
+            }
             error => error.into(),
         })?;
+    let versions: Vec<&VersionMeta> = timeline
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            HistoryEntry::Version(meta) => Some(meta),
+            HistoryEntry::Event(_) => None,
+        })
+        .collect();
+    let events: Vec<&EventMeta> = timeline
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            HistoryEntry::Event(meta) => Some(meta),
+            HistoryEntry::Version(_) => None,
+        })
+        .collect();
+    // The newest version is current unless the variable is removed.
+    let newest = versions.first().map_or(0, |meta| meta.version);
+    let current = (!timeline.removed).then_some(newest);
 
     let warnings = warnings(&target, None);
     if json {
         let versions: Vec<_> = versions
             .iter()
-            .enumerate()
-            .map(|(i, meta)| {
+            .map(|meta| {
+                let (operation, restored_version) = match meta.operation {
+                    Operation::Import => ("import", None),
+                    Operation::Set => ("set", None),
+                    Operation::Undo { restored } => ("undo", Some(restored)),
+                    Operation::Unknown => ("unknown", None),
+                };
                 json!({
                     "version": meta.version,
                     "created_at": meta.created_at,
-                    "current": i == 0,
+                    "operation": operation,
+                    "restored_version": restored_version,
+                    "current": current == Some(meta.version),
+                })
+            })
+            .collect();
+        let events: Vec<_> = events
+            .iter()
+            .map(|meta| {
+                let (kind, from, to) = match &meta.event {
+                    Event::Rename { from, to } => {
+                        ("rename", Some(from.as_str()), Some(to.as_str()))
+                    }
+                    Event::Remove => ("remove", None, None),
+                    Event::Restore => ("restore", None, None),
+                };
+                json!({
+                    "at": meta.at,
+                    "after_version": meta.after_version,
+                    "kind": kind,
+                    "from": from,
+                    "to": to,
                 })
             })
             .collect();
@@ -273,7 +326,9 @@ pub(crate) fn history(
                 "project": target.project,
                 "environment": target.environment.name,
                 "name": name.as_str(),
+                "removed": timeline.removed,
                 "versions": versions,
+                "events": events,
                 "warnings": warnings,
             }),
         );
@@ -281,37 +336,68 @@ pub(crate) fn history(
     }
 
     print_warnings(out, &warnings);
-    let _ = writeln!(out, "{name} in {}", target.label());
+    let state = if timeline.removed {
+        format!("removed (last value: version {newest})")
+    } else {
+        format!("current value: version {newest}")
+    };
+    let _ = writeln!(out, "{name} in {} — {state}", target.label());
     let width = versions
         .iter()
         .map(|meta| meta.version.to_string().len())
         .max()
         .unwrap_or(1);
-    for (i, meta) in versions.iter().enumerate() {
-        let current = if i == 0 { "  (current)" } else { "" };
-        let _ = writeln!(
-            out,
-            "  {:>width$}  {} UTC{current}",
-            meta.version, meta.created_at
-        );
+    for entry in &timeline.entries {
+        let _ = match entry {
+            HistoryEntry::Version(meta) => {
+                let operation = operation_text(meta.operation);
+                writeln!(
+                    out,
+                    "  {:>width$}  {} UTC  {operation}",
+                    meta.version, meta.created_at
+                )
+            }
+            HistoryEntry::Event(meta) => {
+                let text = match &meta.event {
+                    Event::Rename { from, to } => format!("renamed {from} → {to}"),
+                    Event::Remove => "removed".to_owned(),
+                    Event::Restore => "restored".to_owned(),
+                };
+                writeln!(out, "  {:>width$}  {} UTC  {text}", "", meta.at)
+            }
+        };
     }
-    if versions.len() > 1 {
+    if timeline.removed {
+        let _ = writeln!(out, "Restore: smart-env undo {name}{}", env_flag(env));
+    } else if timeline.entries.len() > 1 {
         let _ = writeln!(
             out,
-            "Restore the previous value: smart-env undo {name}{}",
+            "Undo the last change: smart-env undo {name}{}",
             env_flag(env)
         );
     }
     Ok(Exit::Success)
 }
 
-/// `smart-env undo NAME`: brings back a removed variable, or writes the
-/// previous value as a new version. Needs the device key; never asks.
+/// `import`, `set`, `undo → N`, `unknown`.
+fn operation_text(operation: Operation) -> String {
+    match operation {
+        Operation::Import => "import".to_owned(),
+        Operation::Set => "set".to_owned(),
+        Operation::Undo { restored } => format!("undo → {restored}"),
+        Operation::Unknown => "unknown".to_owned(),
+    }
+}
+
+/// `smart-env undo NAME [--to VERSION]`: brings back a removed variable, or
+/// writes the previous value (or that of `--to`) as a new version. Needs the
+/// device key; never asks.
 pub(crate) fn undo(
     ctx: &mut Context<'_>,
     json: bool,
     env: Option<&EnvRef>,
     name: &str,
+    to: Option<u32>,
     out: &mut dyn Write,
 ) -> Result<Exit, CliError> {
     let name = parse_name(name)?;
@@ -319,44 +405,101 @@ pub(crate) fn undo(
     let key = device_key(ctx)?;
     let env_id = target.environment.id;
 
-    // The library returns only the version after the operation; what is
-    // restored is decided here, before anything changes.
-    let live = vault.list(env_id)?.iter().any(|meta| meta.name == name);
-    let restored_version = if live {
-        vault
-            .history(env_id, &name)?
-            .get(1)
-            .map(|meta| meta.version)
-    } else {
-        None
+    let undone = match to {
+        Some(to) => {
+            let version = vault
+                .restore(env_id, &name, to, &key)
+                .map_err(|error| match error {
+                    VaultError::VersionNotFound => CliError::from(error).with_hint(format!(
+                        "Versions: smart-env history {name}{}",
+                        env_flag(env)
+                    )),
+                    VaultError::SecretNotFound => renamed_hint(&vault, env_id, &name, "undo", env)
+                        .unwrap_or_else(|| {
+                            CliError::from(error).with_hint(format!(
+                                "A removed variable comes back first with: smart-env undo {name}{}",
+                                env_flag(env)
+                            ))
+                        }),
+                    error => error.into(),
+                })?;
+            Undone::Value {
+                version,
+                restored: to,
+            }
+        }
+        None => vault
+            .undo_last(env_id, &name, &key)
+            .map_err(|error| match error {
+                VaultError::SecretNotFound => {
+                    renamed_hint(&vault, env_id, &name, "undo", env).unwrap_or_else(|| error.into())
+                }
+                error => error.into(),
+            })?,
     };
-    let version = vault.undo(env_id, &name, &key)?;
 
     let warnings = warnings(&target, None);
     let label = target.label();
-    if json {
-        print_json(
-            out,
+    let base = json!({
+        "project": target.project,
+        "environment": target.environment.name,
+        "warnings": warnings,
+    });
+    let (report, line) = match &undone {
+        Undone::Value { version, restored } => (
             json!({
                 "status": "restored",
-                "project": target.project,
-                "environment": target.environment.name,
+                "undone": "value",
                 "name": name.as_str(),
                 "version": version,
-                "restored_version": restored_version,
-                "was_removed": !live,
-                "warnings": warnings,
+                "restored_version": restored,
+                "was_removed": false,
             }),
-        );
-    } else {
-        print_warnings(out, &warnings);
-        let _ = match restored_version {
-            Some(restored) => writeln!(
-                out,
+            format!(
                 "✓ {name} restored to version {restored} in {label} (saved as version {version})"
             ),
-            None => writeln!(out, "✓ {name} restored in {label} (version {version})"),
-        };
+        ),
+        Undone::Removal { version } => (
+            json!({
+                "status": "restored",
+                "undone": "remove",
+                "name": name.as_str(),
+                "version": version,
+                "restored_version": null,
+                "was_removed": true,
+            }),
+            format!("✓ {name} restored in {label} (version {version})"),
+        ),
+        Undone::Restore => (
+            json!({
+                "status": "removed",
+                "undone": "restore",
+                "name": name.as_str(),
+            }),
+            format!(
+                "✓ Undid restore: {name} removed again from {label} (undo: smart-env undo {name}{})",
+                env_flag(env)
+            ),
+        ),
+        Undone::Rename { from, to } => (
+            json!({
+                "status": "renamed",
+                "undone": "rename",
+                "from": from.as_str(),
+                "to": to.as_str(),
+            }),
+            format!("✓ Undid rename: {from} is {to} again in {label}"),
+        ),
+    };
+    if json {
+        let mut report = report;
+        if let (Some(report), Some(base)) = (report.as_object_mut(), base.as_object()) {
+            report.extend(base.clone());
+        }
+        print_json(out, report);
+    } else {
+        print_warnings(out, &warnings);
+        let _ = writeln!(out, "{line}");
     }
     Ok(Exit::Success)
 }
@@ -405,6 +548,29 @@ fn prompt(ctx: &mut Context<'_>, name: &VarName) -> Result<SecretValue, CliError
 
 fn parse_name(name: &str) -> Result<VarName, CliError> {
     VarName::parse(name).map_err(|error| VaultError::Secret(error).into())
+}
+
+/// `secret_not_found` saying what `name` was renamed to and how to run
+/// `smart-env <command>` with the new name; `None` if it was not renamed.
+fn renamed_hint(
+    vault: &Vault,
+    env_id: EnvironmentId,
+    name: &VarName,
+    command: &str,
+    env: Option<&EnvRef>,
+) -> Option<CliError> {
+    let renamed = vault.renamed_to(env_id, name).ok()??;
+    Some(
+        CliError::new(
+            "secret_not_found",
+            Exit::NotFound,
+            format!("{name} was renamed to {renamed}."),
+        )
+        .with_hint(format!(
+            "Use the new name: smart-env {command} {renamed}{}",
+            env_flag(env)
+        )),
+    )
 }
 
 /// ` --env <as typed>` when `--env` was given, for hints that repeat a

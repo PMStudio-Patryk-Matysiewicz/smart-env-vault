@@ -82,10 +82,14 @@ pub enum Command {
         /// Variable name.
         name: String,
     },
-    /// Restore the previous version or a removed variable.
+    /// Undo the last change of a variable (value, rename, removal or restore).
     Undo {
         /// Variable name.
         name: String,
+        /// Restore this version from `smart-env history` instead of the
+        /// previous one.
+        #[arg(long, value_name = "VERSION", value_parser = clap::value_parser!(u32).range(1..))]
+        to: Option<u32>,
     },
     /// Run a command with the environment's variables.
     Run {
@@ -201,7 +205,7 @@ fn dispatch(
         Command::Rm { name } => variables::rm(ctx, json, env, name, out),
         Command::Rename { from, to } => variables::rename(ctx, json, env, from, to, out),
         Command::History { name } => variables::history(ctx, json, env, name, out),
-        Command::Undo { name } => variables::undo(ctx, json, env, name, out),
+        Command::Undo { name, to } => variables::undo(ctx, json, env, name, *to, out),
         Command::Unlock => lock::unlock(ctx, json, out),
         Command::Lock => lock::lock(ctx, json, out),
         _ => Err(CliError::new(

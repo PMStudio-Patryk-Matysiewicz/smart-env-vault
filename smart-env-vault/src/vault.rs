@@ -9,7 +9,11 @@ use std::{fs::OpenOptions, path::Path};
 use thiserror::Error;
 
 const SCHEMA: &str = include_str!("../migrations/20261102000000_init_schema.sql");
-const SCHEMA_VERSION: i64 = 1;
+/// Upgrade of schema 1 vaults (operations of value versions).
+const UPGRADE_TO_2: &str = include_str!("../migrations/20261126000000_operations.sql");
+/// Upgrade of schema 2 vaults (events: rename, remove, restore).
+const UPGRADE_TO_3: &str = include_str!("../migrations/20261126000001_events.sql");
+const SCHEMA_VERSION: i64 = 3;
 
 /// Errors of [`Vault`] operations. Never carries a secret value.
 #[derive(Debug, Error)]
@@ -64,6 +68,10 @@ pub enum VaultError {
     /// [`Vault::undo`] found no previous version of the secret.
     #[error("no previous version to restore")]
     NothingToUndo,
+    /// [`Vault::restore`] asked for a version that is not in the history
+    /// (never existed or dropped beyond [`HISTORY_LIMIT`]).
+    #[error("version not found in the history")]
+    VersionNotFound,
     /// [`Vault::create_environment`] found no active recipient to wrap the
     /// new DEK for; add one with [`Vault::add_recipient`] first.
     #[error("vault has no active recipients")]
@@ -336,6 +344,34 @@ pub enum Operation {
     Unknown,
 }
 
+impl Operation {
+    /// `(operation, restored_version)` columns.
+    fn to_columns(self) -> (&'static str, Option<u32>) {
+        match self {
+            Self::Import => ("import", None),
+            Self::Set => ("set", None),
+            Self::Undo { restored } => ("undo", Some(restored)),
+            Self::Unknown => ("unknown", None),
+        }
+    }
+
+    /// From the `(operation, restored_version)` columns; the schema
+    /// guarantees an undo has its version.
+    fn from_columns(operation: &str, restored: Option<u32>) -> rusqlite::Result<Self> {
+        match (operation, restored) {
+            ("import", None) => Ok(Self::Import),
+            ("set", None) => Ok(Self::Set),
+            ("undo", Some(restored)) => Ok(Self::Undo { restored }),
+            ("unknown", None) => Ok(Self::Unknown),
+            _ => Err(rusqlite::Error::InvalidColumnType(
+                0,
+                "operation".to_owned(),
+                rusqlite::types::Type::Text,
+            )),
+        }
+    }
+}
+
 /// One entry of [`Vault::history`]: a version, when and how it was written,
 /// never the value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -346,6 +382,80 @@ pub struct VersionMeta {
     pub created_at: String,
     /// What wrote this version.
     pub operation: Operation,
+}
+
+/// A change of a secret that is not a new value: it is recorded next to the
+/// value versions so [`Vault::timeline`] shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Event {
+    /// [`Vault::rename`].
+    Rename {
+        /// Name before.
+        from: VarName,
+        /// Name after.
+        to: VarName,
+    },
+    /// [`Vault::remove`].
+    Remove,
+    /// [`Vault::undo`] of a removed secret.
+    Restore,
+}
+
+/// One [`Event`] and when it happened.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventMeta {
+    /// When (UTC, `YYYY-MM-DD HH:MM:SS`).
+    pub at: String,
+    /// Version that was current when it happened.
+    pub after_version: u32,
+    /// What happened.
+    pub event: Event,
+}
+
+/// One line of [`Vault::timeline`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HistoryEntry {
+    /// A value version.
+    Version(VersionMeta),
+    /// A change without a new value.
+    Event(EventMeta),
+}
+
+/// Everything that happened to a secret, newest first, never values.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Timeline {
+    /// The secret is removed (and can be brought back with
+    /// [`Vault::undo`]).
+    pub removed: bool,
+    /// Versions and events, newest first; events that happened while
+    /// version `n` was current come right before (above) version `n`.
+    pub entries: Vec<HistoryEntry>,
+}
+
+/// What [`Vault::undo_last`] undid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Undone {
+    /// A value change: the value of `restored` is now version `version`.
+    Value {
+        /// New version.
+        version: u32,
+        /// Version whose value was restored.
+        restored: u32,
+    },
+    /// A removal: the secret is back, at version `version`.
+    Removal {
+        /// Current version.
+        version: u32,
+    },
+    /// A restore: the secret is removed again.
+    Restore,
+    /// A rename: the secret called `from` is called `to` again.
+    Rename {
+        /// Name before the undo.
+        from: VarName,
+        /// Name after the undo (the one before the rename).
+        to: VarName,
+    },
 }
 
 /// A secret row together with everything needed to rebuild its AAD.
@@ -405,16 +515,20 @@ impl Vault {
         Ok(Vault { conn, id })
     }
 
-    /// Opens an existing vault. Never creates a file.
+    /// Opens an existing vault. Never creates a file. A schema 1 vault is
+    /// upgraded in place, in one transaction (versions written before then
+    /// get [`Operation::Unknown`]).
     ///
     /// # Errors
     /// [`VaultError::UnsupportedSchema`] for a non-database file or an unknown
     /// schema version, [`VaultError::Storage`] if the file cannot be opened.
     pub fn open(path: &Path) -> Result<Vault, VaultError> {
-        let conn = connect(path)?;
+        let mut conn = connect(path)?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version != SCHEMA_VERSION {
-            return Err(VaultError::UnsupportedSchema);
+        match version {
+            SCHEMA_VERSION => {}
+            1 | 2 => upgrade(&mut conn)?,
+            _ => return Err(VaultError::UnsupportedSchema),
         }
         let id = conn.query_row("SELECT id FROM vaults", [], |row| row.get(0))?;
         Ok(Vault { conn, id })
@@ -505,7 +619,7 @@ impl Vault {
                 if !seen.insert(name) {
                     return Err(VaultError::DuplicateName(name.clone()));
                 }
-                write_value(&tx, self.id, id, name, None, value, &dek)?;
+                write_value(&tx, self.id, id, name, None, value, &dek, Operation::Import)?;
             }
             if !environment.entries.is_empty() {
                 bump_revision(&tx, id)?;
@@ -879,7 +993,16 @@ impl Vault {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let active = active_dek(&tx, env, key)?;
         let existing = current(&tx, env, name)?;
-        let outcome = write_value(&tx, self.id, env, name, existing, value, &active)?;
+        let outcome = write_value(
+            &tx,
+            self.id,
+            env,
+            name,
+            existing,
+            value,
+            &active,
+            Operation::Set,
+        )?;
         if let Some(inject) = inject {
             tx.execute(
                 "UPDATE secrets SET inject = ?2 WHERE key_id = ?1",
@@ -988,6 +1111,7 @@ impl Vault {
         if removed == 0 {
             return Ok(false);
         }
+        record_event(&tx, env, name, &Event::Remove)?;
         bump_revision(&tx, env)?;
         tx.commit()?;
         Ok(true)
@@ -1021,6 +1145,11 @@ impl Vault {
         if renamed == 0 {
             return Err(VaultError::SecretNotFound);
         }
+        let event = Event::Rename {
+            from: from.clone(),
+            to: to.clone(),
+        };
+        record_event(&tx, env, to, &event)?;
         bump_revision(&tx, env)?;
         tx.commit()?;
         Ok(())
@@ -1058,35 +1187,214 @@ impl Vault {
         name: &VarName,
     ) -> Result<Vec<VersionMeta>, VaultError> {
         ensure_environment(&self.conn, env)?;
-        let (key_id, version, updated_at): (KeyId, u32, String) = self
+        let (key_id, current): (KeyId, VersionMeta) = self
             .conn
             .query_row(
-                "SELECT key_id, version, updated_at FROM secrets
+                "SELECT key_id, version, updated_at, operation, restored_version FROM secrets
                   WHERE environment_id = ?1 AND name = ?2 AND deleted_at IS NULL",
                 params![env, name.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, version_meta(row, 1)?)),
             )
             .optional()?
             .ok_or(VaultError::SecretNotFound)?;
         let mut statement = self.conn.prepare(
-            "SELECT version, created_at FROM secret_versions
+            "SELECT version, created_at, operation, restored_version FROM secret_versions
               WHERE key_id = ?1 ORDER BY version DESC",
         )?;
-        let previous = statement.query_map([key_id], |row| {
-            Ok(VersionMeta {
-                version: row.get(0)?,
-                created_at: row.get(1)?,
-                operation: Operation::Unknown, // red: not recorded yet
+        let previous = statement.query_map([key_id], |row| version_meta(row, 0))?;
+        std::iter::once(Ok(current))
+            .chain(previous)
+            .collect::<Result<_, _>>()
+            .map_err(VaultError::from)
+    }
+
+    /// Versions and events ([`Event`]) of a secret, newest first. Works for a
+    /// removed secret too (`removed` is then `true`). No key needed; never
+    /// returns values.
+    ///
+    /// # Errors
+    /// [`VaultError::SecretNotFound`] if no secret has this name (or it was
+    /// purged); [`VaultError::EnvironmentNotFound`].
+    pub fn timeline(&self, env: EnvironmentId, name: &VarName) -> Result<Timeline, VaultError> {
+        ensure_environment(&self.conn, env)?;
+        let (key_id, removed, current): (KeyId, bool, VersionMeta) = self
+            .conn
+            .query_row(
+                "SELECT key_id, deleted_at IS NOT NULL,
+                        version, updated_at, operation, restored_version
+                   FROM secrets WHERE environment_id = ?1 AND name = ?2",
+                params![env, name.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, version_meta(row, 2)?)),
+            )
+            .optional()?
+            .ok_or(VaultError::SecretNotFound)?;
+
+        let mut statement = self.conn.prepare(
+            "SELECT version, created_at, operation, restored_version FROM secret_versions
+              WHERE key_id = ?1 ORDER BY version DESC",
+        )?;
+        let versions = std::iter::once(Ok(current))
+            .chain(statement.query_map([key_id], |row| version_meta(row, 0))?)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut statement = self.conn.prepare(
+            "SELECT at, after_version, kind, from_name, to_name FROM secret_events
+              WHERE key_id = ?1 ORDER BY id DESC",
+        )?;
+        let events = statement
+            .query_map([key_id], |row| {
+                let kind: String = row.get(2)?;
+                let names = (
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                );
+                Ok((row.get(0)?, row.get(1)?, kind, names))
+            })?
+            .map(|row| {
+                let (at, after_version, kind, names): (String, u32, String, _) = row?;
+                let event = match (kind.as_str(), names) {
+                    ("rename", (Some(from), Some(to))) => Event::Rename {
+                        from: VarName::parse(&from)?,
+                        to: VarName::parse(&to)?,
+                    },
+                    ("remove", (None, None)) => Event::Remove,
+                    ("restore", (None, None)) => Event::Restore,
+                    _ => return Err(VaultError::UnsupportedSchema),
+                };
+                Ok(EventMeta {
+                    at,
+                    after_version,
+                    event,
+                })
             })
-        })?;
-        std::iter::once(Ok(VersionMeta {
-            version,
-            created_at: updated_at,
-            operation: Operation::Unknown, // red: not recorded yet
-        }))
-        .chain(previous)
-        .collect::<Result<_, _>>()
-        .map_err(VaultError::from)
+            .collect::<Result<Vec<_>, VaultError>>()?;
+
+        // Newest first: events that happened while version n was current
+        // come right before version n.
+        let mut entries = Vec::with_capacity(versions.len() + events.len());
+        let mut events = events.into_iter().peekable();
+        for version in versions {
+            while let Some(event) = events.next_if(|event| event.after_version >= version.version) {
+                entries.push(HistoryEntry::Event(event));
+            }
+            entries.push(HistoryEntry::Version(version));
+        }
+        // Events at versions dropped beyond the history limit.
+        entries.extend(events.map(HistoryEntry::Event));
+        Ok(Timeline { removed, entries })
+    }
+
+    /// Undoes the newest change on the secret's [`timeline`](Vault::timeline),
+    /// whatever it was: a value change (the previous value becomes a new
+    /// version), a removal (brought back), a restore (removed again) or a
+    /// rename (renamed back). Every undo is itself a change, so the next one
+    /// reverts it. Needs the key for every kind, like any undo; increments
+    /// the environment [`revision`](Vault::revision).
+    ///
+    /// # Errors
+    /// [`VaultError::SecretNotFound`], [`VaultError::NothingToUndo`] (a single
+    /// version and no events), [`VaultError::SecretNameTaken`] (renaming back
+    /// onto a name used meanwhile), [`VaultError::Key`] (`Unwrap`) for a wrong
+    /// key; nothing changes on error.
+    pub fn undo_last(
+        &mut self,
+        env: EnvironmentId,
+        name: &VarName,
+        key: &impl Unwrapper,
+    ) -> Result<Undone, VaultError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let active = active_dek(&tx, env, key)?;
+        let current = current(&tx, env, name)?.ok_or(VaultError::SecretNotFound)?;
+
+        // The newest event, if it happened after the current version was
+        // written (the same rule as the timeline order).
+        let last_event = tx
+            .query_row(
+                "SELECT kind, from_name, after_version FROM secret_events
+                  WHERE key_id = ?1 ORDER BY id DESC LIMIT 1",
+                [current.key_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, u32>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .filter(|(_, _, after_version)| *after_version >= current.version);
+
+        let undone = match last_event {
+            Some((kind, Some(from), _)) if kind == "rename" => {
+                let back = VarName::parse(&from)?;
+                tx.execute(
+                    "UPDATE secrets SET name = ?2 WHERE key_id = ?1",
+                    params![current.key_id, back.as_str()],
+                )
+                .map_err(|error| unique_as(error, VaultError::SecretNameTaken))?;
+                let event = Event::Rename {
+                    from: name.clone(),
+                    to: back.clone(),
+                };
+                record_event(&tx, env, &back, &event)?;
+                Undone::Rename {
+                    from: name.clone(),
+                    to: back,
+                }
+            }
+            Some((kind, _, _)) if kind == "restore" && !current.deleted => {
+                tx.execute(
+                    "UPDATE secrets SET deleted_at = CURRENT_TIMESTAMP WHERE key_id = ?1",
+                    [current.key_id],
+                )?;
+                record_event(&tx, env, name, &Event::Remove)?;
+                Undone::Restore
+            }
+            // A removal, with or without its event (removed before events
+            // were recorded).
+            _ if current.deleted => {
+                bring_back(&tx, env, name, current.key_id)?;
+                Undone::Removal {
+                    version: current.version,
+                }
+            }
+            _ => {
+                let (version, restored) =
+                    undo_value(&tx, self.id, env, name, current, &active, key)?;
+                Undone::Value { version, restored }
+            }
+        };
+        bump_revision(&tx, env)?;
+        tx.commit()?;
+        Ok(undone)
+    }
+
+    /// Current name of the secret most recently renamed away from `name` in
+    /// this environment, if it is not called `name` again — for hints when
+    /// someone uses the old name.
+    ///
+    /// # Errors
+    /// [`VaultError::EnvironmentNotFound`].
+    pub fn renamed_to(
+        &self,
+        env: EnvironmentId,
+        name: &VarName,
+    ) -> Result<Option<VarName>, VaultError> {
+        ensure_environment(&self.conn, env)?;
+        let current: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT s.name FROM secret_events e JOIN secrets s ON s.key_id = e.key_id
+                  WHERE s.environment_id = ?1 AND e.kind = 'rename' AND e.from_name = ?2
+                    AND s.name <> ?2
+                  ORDER BY e.id DESC LIMIT 1",
+                params![env, name.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(current.map(|name| VarName::parse(&name)).transpose()?)
     }
 
     /// Restores the previous state of a secret. History only grows:
@@ -1115,63 +1423,50 @@ impl Vault {
         let active = active_dek(&tx, env, key)?;
         let current = current(&tx, env, name)?.ok_or(VaultError::SecretNotFound)?;
 
-        if current.deleted {
-            tx.execute(
-                "UPDATE secrets SET deleted_at = NULL WHERE key_id = ?1",
-                [current.key_id],
-            )?;
-            bump_revision(&tx, env)?;
-            tx.commit()?;
-            return Ok(current.version);
-        }
-
-        let previous = tx
-            .query_row(
-                "SELECT version, format_version, dek_version, nonce, ciphertext
-                   FROM secret_versions WHERE key_id = ?1
-                  ORDER BY version DESC LIMIT 1",
-                [current.key_id],
-                |row| {
-                    Ok((
-                        row.get::<_, u32>(0)?,
-                        row.get::<_, u32>(1)?,
-                        row.get::<_, u32>(2)?,
-                        row.get::<_, Vec<u8>>(3)?,
-                        row.get::<_, Vec<u8>>(4)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((version, format_version, dek_version, nonce, ciphertext)) = previous else {
-            return Err(VaultError::NothingToUndo);
-        };
-
-        let old_dek;
-        let dek = if dek_version == active.version {
-            &active.dek
+        let version = if current.deleted {
+            bring_back(&tx, env, name, current.key_id)?;
+            current.version
         } else {
-            old_dek = dek_at(&tx, env, dek_version, key)?;
-            &old_dek
+            undo_value(&tx, self.id, env, name, current, &active, key)?.0
         };
-        let sealed = EncryptedValue {
-            nonce: nonce.try_into().map_err(|_| SecretError::Decrypt)?,
-            ciphertext,
-        };
-        let aad = Aad {
-            format_version,
-            vault: self.id,
-            project: active.project,
-            environment: env,
-            key: current.key_id,
-            dek_version,
-            version,
-        };
-        let restored = dek.decrypt(&sealed, &aad)?;
-
-        let outcome = write_value(&tx, self.id, env, name, Some(current), &restored, &active)?;
         bump_revision(&tx, env)?;
         tx.commit()?;
-        Ok(outcome.version)
+        Ok(version)
+    }
+
+    /// Writes the value of `version` (from the history) as a new version,
+    /// recorded as [`Operation::Undo`] with `restored: version`. History only
+    /// grows, so this can be undone like any other change. Unwraps the DEK
+    /// before writing anything; increments the environment
+    /// [`revision`](Vault::revision). Returns the new version.
+    ///
+    /// # Errors
+    /// [`VaultError::SecretNotFound`] if the secret does not exist or was
+    /// removed (bring it back with [`undo`](Vault::undo) first);
+    /// [`VaultError::NothingToUndo`] if `version` is the current one;
+    /// [`VaultError::VersionNotFound`] if `version` is not in the history;
+    /// [`VaultError::Key`] (`Unwrap`) for a wrong key — nothing is written.
+    pub fn restore(
+        &mut self,
+        env: EnvironmentId,
+        name: &VarName,
+        version: u32,
+        key: &impl Unwrapper,
+    ) -> Result<u32, VaultError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let active = active_dek(&tx, env, key)?;
+        let current = current(&tx, env, name)?
+            .filter(|current| !current.deleted)
+            .ok_or(VaultError::SecretNotFound)?;
+        if version == current.version {
+            return Err(VaultError::NothingToUndo);
+        }
+        let outcome = write_from_history(&tx, self.id, env, name, current, version, &active, key)?;
+        bump_revision(&tx, env)?;
+        tx.commit()?;
+        Ok(outcome)
     }
 
     /// Deletes a secret permanently, together with its history; works on
@@ -1314,7 +1609,14 @@ impl Vault {
             }
             let existing = current(&tx, env, name)?;
             outcomes.push(write_value(
-                &tx, self.id, env, name, existing, value, &active,
+                &tx,
+                self.id,
+                env,
+                name,
+                existing,
+                value,
+                &active,
+                Operation::Import,
             )?);
         }
         if !outcomes.is_empty() {
@@ -1490,6 +1792,91 @@ fn current(
         .optional()?)
 }
 
+/// `version, created_at, operation, restored_version` starting at column
+/// `first`.
+fn version_meta(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<VersionMeta> {
+    let operation: String = row.get(first + 2)?;
+    Ok(VersionMeta {
+        version: row.get(first)?,
+        created_at: row.get(first + 1)?,
+        operation: Operation::from_columns(&operation, row.get(first + 3)?)?,
+    })
+}
+
+/// Schema 1 or 2 -> current in one transaction; re-checks the version inside
+/// it, so a concurrent upgrade by another process is not applied twice.
+fn upgrade(conn: &mut Connection) -> Result<(), VaultError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version == 1 {
+        tx.execute_batch(UPGRADE_TO_2)?;
+    }
+    if version <= 2 {
+        tx.execute_batch(UPGRADE_TO_3)?;
+    }
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Brings back a removed secret and records [`Event::Restore`].
+fn bring_back(
+    conn: &Connection,
+    env: EnvironmentId,
+    name: &VarName,
+    key_id: KeyId,
+) -> Result<(), VaultError> {
+    conn.execute(
+        "UPDATE secrets SET deleted_at = NULL WHERE key_id = ?1",
+        [key_id],
+    )?;
+    record_event(conn, env, name, &Event::Restore)
+}
+
+/// Writes the newest previous value as a new version; returns `(new
+/// version, restored version)`.
+fn undo_value(
+    conn: &Connection,
+    vault: VaultId,
+    env: EnvironmentId,
+    name: &VarName,
+    current: Current,
+    active: &ActiveDek,
+    key: &impl Unwrapper,
+) -> Result<(u32, u32), VaultError> {
+    let restored = conn
+        .query_row(
+            "SELECT max(version) FROM secret_versions WHERE key_id = ?1",
+            [current.key_id],
+            |row| row.get::<_, Option<u32>>(0),
+        )?
+        .ok_or(VaultError::NothingToUndo)?;
+    let version = write_from_history(conn, vault, env, name, current, restored, active, key)?;
+    Ok((version, restored))
+}
+
+/// Records an [`Event`] of the secret now called `name`, at its current
+/// version.
+fn record_event(
+    conn: &Connection,
+    env: EnvironmentId,
+    name: &VarName,
+    event: &Event,
+) -> Result<(), VaultError> {
+    let (kind, from, to) = match event {
+        Event::Rename { from, to } => ("rename", Some(from.as_str()), Some(to.as_str())),
+        Event::Remove => ("remove", None, None),
+        Event::Restore => ("restore", None, None),
+    };
+    conn.execute(
+        "INSERT INTO secret_events (key_id, after_version, kind, from_name, to_name)
+         SELECT key_id, version, ?3, ?4, ?5 FROM secrets
+          WHERE environment_id = ?1 AND name = ?2",
+        params![env, name.as_str(), kind, from, to],
+    )?;
+    Ok(())
+}
+
 fn bump_revision(conn: &Connection, env: EnvironmentId) -> Result<(), VaultError> {
     conn.execute(
         "UPDATE environments SET revision = revision + 1 WHERE id = ?1",
@@ -1502,6 +1889,73 @@ fn bump_revision(conn: &Connection, env: EnvironmentId) -> Result<(), VaultError
 /// with the active DEK: archives the current value, trims the history to
 /// [`HISTORY_LIMIT`] and clears a soft delete. Does not touch the revision:
 /// each caller increments it once per operation.
+/// Decrypts `version` from the history (with its own DEK version and
+/// AAD) and writes it as a new version, recorded as an undo of it.
+/// Returns the new version; the caller bumps the revision and commits.
+#[allow(clippy::too_many_arguments)] // private; mirrors `write_value`
+fn write_from_history(
+    tx: &Connection,
+    vault: VaultId,
+    env: EnvironmentId,
+    name: &VarName,
+    current: Current,
+    version: u32,
+    active: &ActiveDek,
+    key: &impl Unwrapper,
+) -> Result<u32, VaultError> {
+    let (format_version, dek_version, nonce, ciphertext) = tx
+        .query_row(
+            "SELECT format_version, dek_version, nonce, ciphertext
+               FROM secret_versions WHERE key_id = ?1 AND version = ?2",
+            params![current.key_id, version],
+            |row| {
+                Ok((
+                    row.get::<_, u32>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or(VaultError::VersionNotFound)?;
+
+    let old_dek;
+    let dek = if dek_version == active.version {
+        &active.dek
+    } else {
+        old_dek = dek_at(tx, env, dek_version, key)?;
+        &old_dek
+    };
+    let sealed = EncryptedValue {
+        nonce: nonce.try_into().map_err(|_| SecretError::Decrypt)?,
+        ciphertext,
+    };
+    let aad = Aad {
+        format_version,
+        vault,
+        project: active.project,
+        environment: env,
+        key: current.key_id,
+        dek_version,
+        version,
+    };
+    let restored = dek.decrypt(&sealed, &aad)?;
+    let outcome = write_value(
+        tx,
+        vault,
+        env,
+        name,
+        Some(current),
+        &restored,
+        active,
+        Operation::Undo { restored: version },
+    )?;
+    Ok(outcome.version)
+}
+
+// Private; every argument is a different part of the row being written.
+#[allow(clippy::too_many_arguments)]
 fn write_value(
     conn: &Connection,
     vault: VaultId,
@@ -1510,7 +1964,9 @@ fn write_value(
     existing: Option<Current>,
     value: &SecretValue,
     active: &ActiveDek,
+    operation: Operation,
 ) -> Result<SetOutcome, VaultError> {
+    let (operation, restored_version) = operation.to_columns();
     let (key_id, version) = match &existing {
         Some(current) => (current.key_id, current.version + 1),
         None => (KeyId::new(), 1),
@@ -1529,8 +1985,10 @@ fn write_value(
     if existing.is_some() {
         conn.execute(
             "INSERT INTO secret_versions
-                 (key_id, version, format_version, dek_version, nonce, ciphertext, created_at)
-             SELECT key_id, version, format_version, dek_version, nonce, ciphertext, updated_at
+                 (key_id, version, format_version, dek_version, nonce, ciphertext, created_at,
+                  operation, restored_version)
+             SELECT key_id, version, format_version, dek_version, nonce, ciphertext, updated_at,
+                    operation, restored_version
                FROM secrets WHERE key_id = ?1",
             [key_id],
         )?;
@@ -1545,6 +2003,7 @@ fn write_value(
             "UPDATE secrets SET
                  format_version = ?2, dek_version = ?3, version = ?4,
                  nonce = ?5, ciphertext = ?6,
+                 operation = ?7, restored_version = ?8,
                  updated_at = CURRENT_TIMESTAMP, deleted_at = NULL
               WHERE key_id = ?1",
             params![
@@ -1553,14 +2012,17 @@ fn write_value(
                 active.version,
                 version,
                 &sealed.nonce[..],
-                sealed.ciphertext
+                sealed.ciphertext,
+                operation,
+                restored_version
             ],
         )?;
     } else {
         conn.execute(
             "INSERT INTO secrets
-                 (key_id, environment_id, name, format_version, dek_version, version, nonce, ciphertext)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (key_id, environment_id, name, format_version, dek_version, version, nonce, ciphertext,
+                  operation, restored_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 key_id,
                 env,
@@ -1569,7 +2031,9 @@ fn write_value(
                 active.version,
                 version,
                 &sealed.nonce[..],
-                sealed.ciphertext
+                sealed.ciphertext,
+                operation,
+                restored_version
             ],
         )?;
     }

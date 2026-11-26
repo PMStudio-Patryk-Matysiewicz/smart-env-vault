@@ -92,6 +92,11 @@ fn vault_errors_should_map_to_contract_exit_codes() {
     let name = VarName::parse("API_KEY").unwrap();
     let cases = [
         (
+            VaultError::VersionNotFound,
+            "version_not_found",
+            Exit::NotFound,
+        ),
+        (
             VaultError::ProjectNotFound,
             "project_not_found",
             Exit::NotFound,

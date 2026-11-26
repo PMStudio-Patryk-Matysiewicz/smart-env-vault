@@ -584,3 +584,65 @@ fn only_undo_has_a_restored_version_and_undo_always_has_one() {
         ));
     }
 }
+
+// --- events of a secret (rename, remove, restore) ---
+
+fn insert_event(
+    db: &Connection,
+    kind: &str,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> rusqlite::Result<usize> {
+    db.execute(
+        "INSERT INTO secret_events (key_id, after_version, kind, from_name, to_name)
+         VALUES (?1, 1, ?2, ?3, ?4)",
+        params![KEY, kind, from, to],
+    )
+}
+
+#[test]
+fn events_are_a_closed_set() {
+    let db = seeded();
+    insert_event(&db, "remove", None, None).unwrap();
+    insert_event(&db, "restore", None, None).unwrap();
+    insert_event(&db, "rename", Some("A"), Some("B")).unwrap();
+    assert_constraint(insert_event(&db, "set", None, None));
+    assert_constraint(insert_event(&db, "inject", None, None));
+}
+
+#[test]
+fn only_a_rename_has_names_and_it_has_both() {
+    let db = seeded();
+    assert_constraint(insert_event(&db, "rename", None, None));
+    assert_constraint(insert_event(&db, "rename", Some("A"), None));
+    assert_constraint(insert_event(&db, "rename", None, Some("B")));
+    assert_constraint(insert_event(&db, "remove", Some("A"), Some("B")));
+    assert_constraint(insert_event(&db, "restore", Some("A"), None));
+}
+
+#[test]
+fn event_belongs_to_an_existing_secret_and_goes_with_it() {
+    let db = seeded();
+    insert_event(&db, "remove", None, None).unwrap();
+    assert_constraint(db.execute(
+        "INSERT INTO secret_events (key_id, after_version, kind) VALUES (?1, 1, 'remove')",
+        [id(9)],
+    ));
+    assert_constraint(db.execute(
+        "INSERT INTO secret_events (key_id, after_version, kind) VALUES (?1, 0, 'remove')",
+        [KEY],
+    ));
+    db.execute("DELETE FROM secrets WHERE key_id = ?1", [KEY])
+        .unwrap();
+    assert_eq!(count(&db, "secret_events"), 0);
+}
+
+#[test]
+fn event_time_defaults_to_now() {
+    let db = seeded();
+    insert_event(&db, "remove", None, None).unwrap();
+    let at: String = db
+        .query_row("SELECT at FROM secret_events", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(at.len(), 19, "{at}");
+}

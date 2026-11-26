@@ -836,15 +836,7 @@ impl Vault {
         value: &SecretValue,
         key: &impl Unwrapper,
     ) -> Result<SetOutcome, VaultError> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let active = active_dek(&tx, env, key)?;
-        let existing = current(&tx, env, name)?;
-        let outcome = write_value(&tx, self.id, env, name, existing, value, &active)?;
-        bump_revision(&tx, env)?;
-        tx.commit()?;
-        Ok(outcome)
+        self.set_with(env, name, value, None, key)
     }
 
     /// Like [`set`](Vault::set), and in the same transaction sets where the
@@ -856,13 +848,27 @@ impl Vault {
     /// As [`set`](Vault::set); on error nothing changes, `inject` included.
     pub fn set_with(
         &mut self,
-        _env: EnvironmentId,
-        _name: &VarName,
-        _value: &SecretValue,
-        _inject: Option<Inject>,
-        _key: &impl Unwrapper,
+        env: EnvironmentId,
+        name: &VarName,
+        value: &SecretValue,
+        inject: Option<Inject>,
+        key: &impl Unwrapper,
     ) -> Result<SetOutcome, VaultError> {
-        todo!()
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let active = active_dek(&tx, env, key)?;
+        let existing = current(&tx, env, name)?;
+        let outcome = write_value(&tx, self.id, env, name, existing, value, &active)?;
+        if let Some(inject) = inject {
+            tx.execute(
+                "UPDATE secrets SET inject = ?2 WHERE key_id = ?1",
+                params![outcome.key_id, inject.as_str()],
+            )?;
+        }
+        bump_revision(&tx, env)?;
+        tx.commit()?;
+        Ok(outcome)
     }
 
     /// Reads and decrypts a secret; `Ok(None)` if no secret has this name.

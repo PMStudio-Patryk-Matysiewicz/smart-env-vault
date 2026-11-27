@@ -10,9 +10,15 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use smart_env_vault::{
+    DataPaths, EnvironmentId, Inject, KeyId, SecretValue, TrustDecision, Vault, VaultError,
+};
 
 use crate::init::ask_yes;
-use crate::{CliError, Context, Exit, Interaction, Shell, ShellEnv};
+use crate::keys::device_key;
+use crate::reserved::{Consent, consent, is_reserved};
+use crate::{CliError, Context, Exit, FILE_NAME, Interaction, ProjectFile, Shell, ShellEnv};
 
 /// Prints the hook script for `shell` to `out`.
 pub(crate) fn hook(ctx: &Context<'_>, shell: Shell, out: &mut dyn Write) -> Result<Exit, CliError> {
@@ -28,16 +34,463 @@ pub(crate) fn hook(ctx: &Context<'_>, shell: Shell, out: &mut dyn Write) -> Resu
 
 /// Called by the hook at every prompt. Never fails and never prints an
 /// error: a broken hook must not break the prompt.
+///
+/// stdout is shell code for the hook to evaluate (restore, export, the new
+/// state); stderr gets at most a few `smart-env: …` lines, never values.
 pub(crate) fn hook_env(
     ctx: &mut Context<'_>,
     shell: Shell,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Exit {
-    // Activation comes with the "mechanics" item; until then the hook is a
-    // no-op everywhere.
-    let _ = (ctx, shell, out, err);
+    let previous = ctx.hook_state.as_deref().and_then(State::parse);
+    let mut step = Step {
+        shell,
+        code: String::new(),
+        messages: Vec::new(),
+    };
+    step.run(ctx, previous.as_ref());
+    let _ = out.write_all(step.code.as_bytes());
+    for message in &step.messages {
+        let _ = writeln!(err, "smart-env: {message}");
+    }
     Exit::Success
+}
+
+/// Version of the hook state format.
+const STATE_VERSION: u64 = 1;
+
+/// What the hook remembers between prompts, in a shell variable. Never
+/// holds values.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct State {
+    /// Canonical project directory.
+    dir: String,
+    /// SHA-256 of `smart-env.toml` (hex).
+    hash: String,
+    /// `project/environment`, for messages.
+    label: String,
+    kind: StateKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StateKind {
+    /// Variables exported.
+    Active {
+        env: EnvironmentId,
+        revision: u64,
+        /// Exported names with the secret and version behind each.
+        vars: Vec<(String, KeyId, u32)>,
+    },
+    /// Nothing exported; `reason` was reported once.
+    Blocked { reason: String },
+}
+
+impl State {
+    fn parse(text: &str) -> Option<Self> {
+        let value: Value = serde_json::from_str(text).ok()?;
+        if value["v"].as_u64()? != STATE_VERSION {
+            return None;
+        }
+        let text = |key: &str| value[key].as_str().map(str::to_owned);
+        let kind = match value["status"].as_str()? {
+            "active" => StateKind::Active {
+                env: value["env"].as_str()?.parse().ok()?,
+                revision: value["revision"].as_u64()?,
+                vars: value["vars"]
+                    .as_array()?
+                    .iter()
+                    .map(|var| {
+                        Some((
+                            var[0].as_str()?.to_owned(),
+                            var[1].as_str()?.parse().ok()?,
+                            u32::try_from(var[2].as_u64()?).ok()?,
+                        ))
+                    })
+                    .collect::<Option<_>>()?,
+            },
+            "blocked" => StateKind::Blocked {
+                reason: text("reason")?,
+            },
+            _ => return None,
+        };
+        Some(Self {
+            dir: text("dir")?,
+            hash: text("hash")?,
+            label: text("label")?,
+            kind,
+        })
+    }
+
+    fn to_json(&self) -> String {
+        let mut value = json!({
+            "v": STATE_VERSION,
+            "dir": self.dir,
+            "hash": self.hash,
+            "label": self.label,
+        });
+        match &self.kind {
+            StateKind::Active {
+                env,
+                revision,
+                vars,
+            } => {
+                value["status"] = json!("active");
+                value["env"] = json!(env.to_string());
+                value["revision"] = json!(revision);
+                value["vars"] = vars
+                    .iter()
+                    .map(|(name, key, version)| json!([name, key.to_string(), version]))
+                    .collect();
+            }
+            StateKind::Blocked { reason } => {
+                value["status"] = json!("blocked");
+                value["reason"] = json!(reason);
+            }
+        }
+        value.to_string()
+    }
+
+    fn exported(&self) -> &[(String, KeyId, u32)] {
+        match &self.kind {
+            StateKind::Active { vars, .. } => vars,
+            StateKind::Blocked { .. } => &[],
+        }
+    }
+}
+
+/// The nearest `smart-env.toml`: its directory, bytes and hash.
+struct Found {
+    dir: PathBuf,
+    bytes: Vec<u8>,
+    hash: [u8; 32],
+}
+
+impl Found {
+    /// Like `ProjectFile::find`, but also for a file that does not parse
+    /// (reported once, keyed by its hash).
+    fn nearest(start: &Path) -> Option<Self> {
+        let start = std::path::absolute(start).ok()?;
+        let path = start
+            .ancestors()
+            .map(|dir| dir.join(FILE_NAME))
+            .find(|path| fs::metadata(path).is_ok_and(|meta| meta.is_file()))?;
+        let bytes = fs::read(&path).ok()?;
+        let dir = fs::canonicalize(path.parent()?).ok()?;
+        let hash = Sha256::digest(&bytes).into();
+        Some(Self { dir, bytes, hash })
+    }
+
+    fn key(&self) -> (String, String) {
+        (
+            self.dir.to_string_lossy().into_owned(),
+            self.hash.iter().map(|byte| format!("{byte:02x}")).collect(),
+        )
+    }
+}
+
+/// One prompt's output.
+struct Step {
+    shell: Shell,
+    code: String,
+    messages: Vec<String>,
+}
+
+impl Step {
+    fn run(&mut self, ctx: &Context<'_>, previous: Option<&State>) {
+        let found = ctx.current_dir.as_deref().and_then(Found::nearest);
+        let data = ctx.data.clone().filter(|data| data.vault_db().exists());
+        let (Some(found), Some(data)) = (found, data) else {
+            self.leave(previous);
+            return;
+        };
+        let (dir, hash) = found.key();
+
+        // Fast path: same file, same environment revision. No key, no
+        // decryption.
+        if let Some(State {
+            kind: StateKind::Active { env, revision, .. },
+            ..
+        }) = previous.filter(|state| state.dir == dir && state.hash == hash)
+            && Vault::open(data.vault_db())
+                .and_then(|vault| vault.revision(*env))
+                .is_ok_and(|current| current == *revision)
+        {
+            return;
+        }
+
+        match self.load(ctx, &data, &found) {
+            Ok((label, env, revision, loaded)) => {
+                self.activate(
+                    previous,
+                    State {
+                        dir,
+                        hash,
+                        label,
+                        kind: StateKind::Active {
+                            env,
+                            revision,
+                            vars: Vec::new(),
+                        },
+                    },
+                    loaded,
+                );
+            }
+            // Denied: nothing to report, so nothing to remember either.
+            Err(Blocked { message: None, .. }) => {
+                if previous.is_some() {
+                    self.restore(previous);
+                    self.code.push_str(&self.shell.clear_state());
+                }
+            }
+            Err(Blocked {
+                label,
+                reason,
+                message,
+            }) => {
+                let state = State {
+                    dir,
+                    hash,
+                    label,
+                    kind: StateKind::Blocked { reason },
+                };
+                // Reported once: the same outcome for the same file is quiet.
+                let repeated = previous == Some(&state);
+                self.restore(previous);
+                if !repeated {
+                    self.messages.extend(message);
+                    self.code.push_str(&self.shell.set_state(&state.to_json()));
+                }
+            }
+        }
+    }
+
+    /// Leaves whatever was loaded (no project here, or not set up).
+    fn leave(&mut self, previous: Option<&State>) {
+        let Some(previous) = previous else { return };
+        if matches!(previous.kind, StateKind::Active { .. }) {
+            self.messages.push(format!(
+                "restored environment from before {}",
+                previous.label
+            ));
+        }
+        self.restore(Some(previous));
+        self.code.push_str(&self.shell.clear_state());
+    }
+
+    /// Puts back the values from before the previous activation.
+    fn restore(&mut self, previous: Option<&State>) {
+        for (name, ..) in previous.map(State::exported).unwrap_or_default() {
+            self.code.push_str(&self.shell.restore(name));
+        }
+    }
+
+    /// Checks trust, the environment and the key, then decrypts.
+    fn load(
+        &mut self,
+        ctx: &Context<'_>,
+        data: &DataPaths,
+        found: &Found,
+    ) -> Result<(String, EnvironmentId, u64, Vec<Loaded>), Blocked> {
+        let error = |label: &str, reason: &str, message: String| Blocked {
+            label: label.to_owned(),
+            reason: reason.to_owned(),
+            message: Some(message),
+        };
+        let file = std::str::from_utf8(&found.bytes)
+            .map_err(|_| crate::project_file::ProjectFileError::Syntax { line: None })
+            .and_then(ProjectFile::parse)
+            .map_err(|e| error("", "invalid", CliError::from(e).message().to_owned()))?;
+        let label = format!("{}/{}", file.project, file.environment);
+
+        let state = data.state().ok();
+        let decision = state
+            .as_ref()
+            .and_then(|state| state.trust(&found.dir).ok().flatten());
+        let allowed = TrustDecision::Allowed {
+            file_hash: found.hash,
+            project_id: file.project_id,
+        };
+        match decision {
+            Some(decision) if decision == allowed => {}
+            Some(TrustDecision::Denied) => {
+                return Err(Blocked {
+                    label,
+                    reason: "denied".to_owned(),
+                    message: None,
+                });
+            }
+            Some(TrustDecision::Allowed { .. }) => {
+                return Err(error(
+                    &label,
+                    "changed",
+                    "smart-env.toml changed since it was allowed. Review it, then run: smart-env allow"
+                        .to_owned(),
+                ));
+            }
+            None => {
+                let message = format!("{label} is not allowed here. Run: smart-env allow");
+                return Err(error(&label, "not_allowed", message));
+            }
+        }
+
+        let failed =
+            |label: &str, e: CliError| error(label, "error", format!("{label}: {}", e.message()));
+        let vault = Vault::open(data.vault_db()).map_err(|e| failed(&label, e.into()))?;
+        let resolved = file.resolve(&vault).map_err(|e| failed(&label, e))?;
+        let project = resolved.renamed_to.unwrap_or(file.project);
+        let label = format!("{project}/{}", file.environment);
+        let env = vault
+            .environments(resolved.id)
+            .map_err(|e| failed(&label, e.into()))?
+            .into_iter()
+            .find(|info| info.name == file.environment)
+            .ok_or_else(|| failed(&label, VaultError::EnvironmentNotFound.into()))?
+            .id;
+
+        let key = device_key(ctx).map_err(|e| {
+            if e.code() == "key_locked" {
+                error(
+                    &label,
+                    "locked",
+                    format!("{label} not loaded: the key is locked. Run: smart-env unlock"),
+                )
+            } else {
+                error(
+                    &label,
+                    "key",
+                    format!("{label} not loaded: {}", e.message()),
+                )
+            }
+        })?;
+        let revision = vault.revision(env).map_err(|e| failed(&label, e.into()))?;
+        let variables = vault
+            .read_all(env, &key)
+            .map_err(|e| failed(&label, e.into()))?;
+
+        let mut loaded = Vec::new();
+        let mut skipped = Vec::new();
+        let mut changed = Vec::new();
+        for (meta, value) in variables {
+            if meta.inject == Inject::Run {
+                continue;
+            }
+            let name = meta.name.as_str().to_owned();
+            if is_reserved(&name) {
+                match consent(state.as_ref(), env, &meta) {
+                    Consent::Current => {}
+                    Consent::Stale => {
+                        changed.push(name);
+                        continue;
+                    }
+                    Consent::Missing => {
+                        skipped.push(name);
+                        continue;
+                    }
+                }
+            }
+            loaded.push(Loaded {
+                name,
+                key: meta.key_id,
+                version: meta.version,
+                value,
+            });
+        }
+        match skipped.as_slice() {
+            [] => {}
+            [name] => self.messages.push(format!(
+                "{name} is a reserved name and was not loaded. Allow it with: smart-env allow --var {name}"
+            )),
+            names => self.messages.push(format!(
+                "{} are reserved names and were not loaded. Allow one with: smart-env allow --var NAME",
+                names.join(", ")
+            )),
+        }
+        for name in changed {
+            self.messages.push(format!(
+                "{name} changed since you allowed it and was not loaded. Allow the new value with: smart-env allow --var {name}"
+            ));
+        }
+        Ok((label, env, revision, loaded))
+    }
+
+    /// Restores the previous variables, exports the new ones, reports.
+    fn activate(&mut self, previous: Option<&State>, mut state: State, loaded: Vec<Loaded>) {
+        self.restore(previous);
+        for var in &loaded {
+            self.code
+                .push_str(&self.shell.save_and_export(&var.name, var.value.expose()));
+        }
+        let vars: Vec<(String, KeyId, u32)> = loaded
+            .iter()
+            .map(|var| (var.name.clone(), var.key, var.version))
+            .collect();
+
+        let same_environment = match (previous.map(|p| (&p.dir, &p.kind)), &state.kind) {
+            (Some((dir, StateKind::Active { env: old, .. })), StateKind::Active { env, .. }) => {
+                *dir == state.dir && old == env
+            }
+            _ => false,
+        };
+        if same_environment {
+            let old = previous.map(State::exported).unwrap_or_default();
+            let find = |list: &[(String, KeyId, u32)], name: &str| {
+                list.iter()
+                    .find(|(n, ..)| n == name)
+                    .map(|(_, k, v)| (*k, *v))
+            };
+            let added: Vec<String> = vars
+                .iter()
+                .filter(|(name, ..)| find(old, name).is_none())
+                .map(|(name, ..)| format!("+{name}"))
+                .collect();
+            let changed: Vec<String> = vars
+                .iter()
+                .filter(|(name, key, version)| {
+                    find(old, name).is_some_and(|before| before != (*key, *version))
+                })
+                .map(|(name, ..)| format!("~{name}"))
+                .collect();
+            let removed: Vec<String> = old
+                .iter()
+                .filter(|(name, ..)| find(&vars, name).is_none())
+                .map(|(name, ..)| format!("-{name}"))
+                .collect();
+            let diff: Vec<String> = added.into_iter().chain(changed).chain(removed).collect();
+            if !diff.is_empty() {
+                self.messages
+                    .push(format!("updated {} ({})", state.label, diff.join(" ")));
+            }
+        } else {
+            let count = if vars.len() == 1 {
+                "1 variable".to_owned()
+            } else {
+                format!("{} variables", vars.len())
+            };
+            self.messages
+                .push(format!("active {} ({count})", state.label));
+        }
+
+        if let StateKind::Active { vars: slot, .. } = &mut state.kind {
+            *slot = vars;
+        }
+        self.code.push_str(&self.shell.set_state(&state.to_json()));
+    }
+}
+
+/// A variable to export.
+struct Loaded {
+    name: String,
+    key: KeyId,
+    version: u32,
+    value: SecretValue,
+}
+
+/// Why nothing is loaded; `message` is shown once (none for `deny`).
+struct Blocked {
+    label: String,
+    reason: String,
+    message: Option<String>,
 }
 
 /// What installing the hook did.

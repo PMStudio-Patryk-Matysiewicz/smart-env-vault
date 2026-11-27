@@ -96,11 +96,30 @@ impl Shell {
     }
 }
 
-/// Runs first in `PROMPT_COMMAND`; keeps `$?` for the user's prompt.
+/// Runs first in `PROMPT_COMMAND`; keeps `$?` for the user's prompt. The
+/// state goes to `hook-env` for that one call only, never exported. Saved
+/// values stay in the shell. Locals have long names: `eval` must not hit a
+/// project variable with the same name.
 const BASH_HOOK: &str = r#"_smart_env_hook() {
-  local previous_exit_status=$?
-  eval "$(@SMART_ENV@ hook-env bash)"
-  return $previous_exit_status
+  local _smart_env_status=$?
+  eval "$(SMART_ENV_HOOK_STATE="${_smart_env_state-}" @SMART_ENV@ hook-env bash)"
+  return $_smart_env_status
+}
+_smart_env_save() {
+  if [[ -n "${!1+x}" ]]; then
+    printf -v "_smart_env_saved_$1" '%s' "${!1}"
+  else
+    printf -v "_smart_env_unset_$1" '%s' 1
+  fi
+}
+_smart_env_restore() {
+  local _smart_env_s="_smart_env_saved_$1" _smart_env_u="_smart_env_unset_$1"
+  if [[ -n "${!_smart_env_s+x}" ]]; then
+    export "$1=${!_smart_env_s}"
+    unset "$_smart_env_s"
+  elif [[ -n "${!_smart_env_u+x}" ]]; then
+    unset "$1" "$_smart_env_u"
+  fi
 }
 if [[ ";${PROMPT_COMMAND:-};" != *";_smart_env_hook;"* ]]; then
   PROMPT_COMMAND="_smart_env_hook${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
@@ -109,9 +128,25 @@ fi
 
 /// Runs before every prompt and after every `cd`; keeps `$?`.
 const ZSH_HOOK: &str = r#"_smart_env_hook() {
-  local previous_exit_status=$?
-  eval "$(@SMART_ENV@ hook-env zsh)"
-  return $previous_exit_status
+  local _smart_env_status=$?
+  eval "$(SMART_ENV_HOOK_STATE="${_smart_env_state-}" @SMART_ENV@ hook-env zsh)"
+  return $_smart_env_status
+}
+_smart_env_save() {
+  if (( ${+parameters[$1]} )); then
+    typeset -g "_smart_env_saved_$1=${(P)1}"
+  else
+    typeset -g "_smart_env_unset_$1=1"
+  fi
+}
+_smart_env_restore() {
+  local _smart_env_s="_smart_env_saved_$1" _smart_env_u="_smart_env_unset_$1"
+  if (( ${+parameters[$_smart_env_s]} )); then
+    export "$1=${(P)_smart_env_s}"
+    unset "$_smart_env_s"
+  elif (( ${+parameters[$_smart_env_u]} )); then
+    unset "$1" "$_smart_env_u"
+  fi
 }
 typeset -ag precmd_functions chpwd_functions
 if (( ! ${precmd_functions[(I)_smart_env_hook]} )); then
@@ -124,38 +159,65 @@ fi
 
 /// Event handlers belong to the function: loading again replaces them.
 const FISH_HOOK: &str = r#"function _smart_env_hook --on-event fish_prompt
-    @SMART_ENV@ hook-env fish | source
+    SMART_ENV_HOOK_STATE="$_smart_env_state" @SMART_ENV@ hook-env fish | source
 end
 function _smart_env_hook_cd --on-variable PWD
     _smart_env_hook
 end
+function _smart_env_save
+    set -l _smart_env_n $argv[1]
+    if set -q $_smart_env_n
+        set -g _smart_env_saved_$_smart_env_n $$_smart_env_n
+    else
+        set -g _smart_env_unset_$_smart_env_n 1
+    end
+end
+function _smart_env_restore
+    set -l _smart_env_s _smart_env_saved_$argv[1]
+    set -l _smart_env_u _smart_env_unset_$argv[1]
+    if set -q $_smart_env_s
+        set -gx $argv[1] $$_smart_env_s
+        set -e $_smart_env_s
+    else if set -q $_smart_env_u
+        set -e $argv[1]
+        set -e $_smart_env_u
+    end
+end
 "#;
 
-/// Shell code `hook-env` prints for the hook to evaluate.
-#[allow(dead_code)] // used by `hook-env` in the green phase
+/// Shell code `hook-env` prints for the hook to evaluate. Names are valid
+/// variable names (`[A-Za-z_][A-Za-z0-9_]*`), so they need no quoting.
 impl Shell {
     /// Remembers the current value of `name` (or that it is unset) in the
     /// shell, then exports `value` literally.
     pub(crate) fn save_and_export(self, name: &str, value: &str) -> String {
-        let _ = (name, value);
-        todo!("Shell::save_and_export")
+        let value = self.quote(value);
+        match self {
+            Self::Bash | Self::Zsh => format!("_smart_env_save {name}\nexport {name}={value}\n"),
+            Self::Fish => format!("_smart_env_save {name}\nset -gx {name} {value}\n"),
+        }
     }
 
     /// Puts back what `name` was before [`Shell::save_and_export`].
     pub(crate) fn restore(self, name: &str) -> String {
-        let _ = name;
-        todo!("Shell::restore")
+        format!("_smart_env_restore {name}\n")
     }
 
     /// Stores the hook state for the next prompt (not exported).
     pub(crate) fn set_state(self, state: &str) -> String {
-        let _ = state;
-        todo!("Shell::set_state")
+        let state = self.quote(state);
+        match self {
+            Self::Bash | Self::Zsh => format!("_smart_env_state={state}\n"),
+            Self::Fish => format!("set -g _smart_env_state {state}\n"),
+        }
     }
 
     /// Forgets the hook state.
     pub(crate) fn clear_state(self) -> String {
-        todo!("Shell::clear_state")
+        match self {
+            Self::Bash | Self::Zsh => "unset _smart_env_state\n".to_owned(),
+            Self::Fish => "set -e _smart_env_state\n".to_owned(),
+        }
     }
 }
 

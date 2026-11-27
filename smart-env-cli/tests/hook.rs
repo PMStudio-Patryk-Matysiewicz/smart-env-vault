@@ -372,9 +372,14 @@ fn the_hook_passes_its_state_to_hook_env_without_exporting_it() {
             },
         );
         let script = format!(
-            "{source}\n{prompt}\n{prompt}\nprintenv _smart_env_state; echo \"exported=$?\"",
+            "{source}\n{prompt}\n{prompt}\nprintenv _smart_env_state; echo \"exported={status}\"",
             source = source(shell, &file),
             prompt = prompt(shell),
+            status = if shell == Shell::Fish {
+                "$status"
+            } else {
+                "$?"
+            },
         );
 
         let (stdout, stderr, _) = run_shell(shell, &script);

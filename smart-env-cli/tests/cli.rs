@@ -30,6 +30,7 @@ fn smart_env(args: &[&str]) -> Output {
         runner: Box::new(smart_env_cli::ProcessRunner),
         shell: smart_env_cli::ShellEnv::default(),
         executable: None,
+        hook_state: None,
     };
     let exit = execute(argv, &mut ctx, &mut out, &mut err);
     Output {

@@ -212,6 +212,7 @@ pub struct Machine {
 const FAKE_SMART_ENV: &str = r#"#!/bin/sh
 dir=$(dirname "$0")
 printf '%s\n' "$*" >> "$dir/calls"
+printf '%s\n' "${SMART_ENV_HOOK_STATE-}" >> "$dir/states"
 if [ -f "$dir/output" ]; then cat "$dir/output"; fi
 "#;
 
@@ -295,6 +296,7 @@ impl Machine {
                 macos: self.macos,
             },
             executable: Some(self.executable.clone()),
+            hook_state: None,
         }
     }
 

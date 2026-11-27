@@ -124,6 +124,9 @@ pub struct Context<'a> {
     /// This `smart-env` binary, called by the hook script by its absolute
     /// path; `None` if the system cannot tell.
     pub executable: Option<PathBuf>,
+    /// The shell hook's state from the previous prompt
+    /// (`SMART_ENV_HOOK_STATE`, set by the hook for `hook-env` only).
+    pub hook_state: Option<String>,
 }
 
 /// Owns the real system resources a [`Context`] borrows.
@@ -137,6 +140,7 @@ pub struct System {
     terminal: Option<StdTerminal>,
     shell: ShellEnv,
     executable: Option<PathBuf>,
+    hook_state: Option<String>,
 }
 
 impl System {
@@ -159,6 +163,9 @@ impl System {
                 .then_some(StdTerminal),
             shell: ShellEnv::detect(),
             executable: std::env::current_exe().ok(),
+            hook_state: std::env::var("SMART_ENV_HOOK_STATE")
+                .ok()
+                .filter(|state| !state.is_empty()),
         }
     }
 
@@ -179,6 +186,7 @@ impl System {
             runner: Box::new(ProcessRunner),
             shell: self.shell.clone(),
             executable: self.executable.clone(),
+            hook_state: self.hook_state.clone(),
         }
     }
 }

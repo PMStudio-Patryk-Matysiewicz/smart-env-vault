@@ -357,6 +357,35 @@ fn loading_the_script_does_not_run_or_export_anything() {
 }
 
 #[test]
+fn the_hook_passes_its_state_to_hook_env_without_exporting_it() {
+    for shell in ALL {
+        if !installed(shell) {
+            continue;
+        }
+        let m = Machine::new();
+        let file = hook_file(&m, shell);
+        fake_output(
+            &m,
+            match shell {
+                Shell::Fish => "set -g _smart_env_state 'state one'\n",
+                _ => "_smart_env_state='state one'\n",
+            },
+        );
+        let script = format!(
+            "{source}\n{prompt}\n{prompt}\nprintenv _smart_env_state; echo \"exported=$?\"",
+            source = source(shell, &file),
+            prompt = prompt(shell),
+        );
+
+        let (stdout, stderr, _) = run_shell(shell, &script);
+
+        let states = std::fs::read_to_string(fake_dir(&m).join("states")).unwrap_or_default();
+        assert_eq!(states, "\nstate one\n", "{}: {stderr}", shell.name());
+        assert!(stdout.contains("exported=1"), "{}: {stdout}", shell.name());
+    }
+}
+
+#[test]
 fn bash_hook_keeps_the_existing_prompt_command_and_exit_status() {
     let shell = Shell::Bash;
     if !installed(shell) {

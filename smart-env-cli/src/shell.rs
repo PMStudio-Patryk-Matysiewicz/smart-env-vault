@@ -131,6 +131,34 @@ function _smart_env_hook_cd --on-variable PWD
 end
 "#;
 
+/// Shell code `hook-env` prints for the hook to evaluate.
+#[allow(dead_code)] // used by `hook-env` in the green phase
+impl Shell {
+    /// Remembers the current value of `name` (or that it is unset) in the
+    /// shell, then exports `value` literally.
+    pub(crate) fn save_and_export(self, name: &str, value: &str) -> String {
+        let _ = (name, value);
+        todo!("Shell::save_and_export")
+    }
+
+    /// Puts back what `name` was before [`Shell::save_and_export`].
+    pub(crate) fn restore(self, name: &str) -> String {
+        let _ = name;
+        todo!("Shell::restore")
+    }
+
+    /// Stores the hook state for the next prompt (not exported).
+    pub(crate) fn set_state(self, state: &str) -> String {
+        let _ = state;
+        todo!("Shell::set_state")
+    }
+
+    /// Forgets the hook state.
+    pub(crate) fn clear_state(self) -> String {
+        todo!("Shell::clear_state")
+    }
+}
+
 impl Shell {
     /// The block `setup` appends to the startup file.
     pub(crate) fn startup_block(self) -> String {

@@ -9,8 +9,7 @@ mod common;
 use std::process::Command;
 
 use common::{Machine, Run, ScriptedTerminal, printed};
-use secrecy::SecretString;
-use smart_env_cli::{ChildCommand, Exit};
+use smart_env_cli::Exit;
 
 const CANARY: &str = "Zq7Kanarek";
 const PASSPHRASE: &str = "correct horse battery staple";
@@ -320,12 +319,12 @@ fn run_puts_values_in_the_environment_never_in_the_arguments() {
 #[test]
 fn a_started_process_has_values_in_its_environment_not_its_command_line() {
     let read = |file: &str| {
-        let command = ChildCommand {
+        let command = smart_env_cli::ChildCommand {
             program: "cat".into(),
             args: vec![file.into()],
             env: vec![(
                 "API_KEY".to_owned(),
-                SecretString::from(format!("sk_live_{CANARY}")),
+                secrecy::SecretString::from(format!("sk_live_{CANARY}")),
             )],
         };
         let output = command.to_command().output().unwrap();

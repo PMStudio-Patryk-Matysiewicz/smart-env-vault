@@ -21,11 +21,12 @@ mod reserved;
 mod run;
 mod setup;
 mod shell;
+mod status;
 mod target;
 mod trust;
 mod variables;
 
-pub use cli::{Cli, Command, GlobalArgs, InjectArg, execute};
+pub use cli::{Cli, Command, GlobalArgs, InjectArg, OnOff, execute};
 pub use context::{ChildCommand, Context, ProcessRunner, Runner, System, Terminal, UNLOCK_TTL};
 pub use dotenv::{Dotenv, DotenvEntry, DotenvError, DotenvWarning};
 pub use env_ref::{EnvRef, EnvRefError};

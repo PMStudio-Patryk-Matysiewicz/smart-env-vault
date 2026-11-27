@@ -270,3 +270,47 @@ fn state_schema_2_is_upgraded_keeping_directory_decisions() {
     let env = EnvironmentId::new();
     assert_eq!(state.var_consent(env, &var("PATH")).unwrap(), None);
 }
+
+// --- state: settings ---
+
+#[test]
+fn auto_activate_is_on_by_default_and_can_be_turned_off() {
+    let temp = TempDir::new().unwrap();
+    let paths = DataPaths::from_root(temp.path().join("smart-env"));
+    let state = paths.state().unwrap();
+
+    assert!(state.auto_activate().unwrap());
+    state.set_auto_activate(false).unwrap();
+    assert!(!paths.state().unwrap().auto_activate().unwrap());
+    state.set_auto_activate(true).unwrap();
+    assert!(state.auto_activate().unwrap());
+}
+
+#[test]
+fn state_schema_3_is_upgraded_keeping_var_consent() {
+    let temp = TempDir::new().unwrap();
+    let paths = DataPaths::from_root(temp.path().join("smart-env"));
+    let env = EnvironmentId::new();
+    let key_id = KeyId::new();
+    {
+        // Schema 3 as the allow --var item wrote it.
+        state_v1(paths.state_db());
+        let state = paths.state().unwrap();
+        state
+            .set_var_consent(env, &var("PATH"), &VarConsent { key_id, version: 2 })
+            .unwrap();
+        drop(state);
+        let conn = rusqlite::Connection::open(paths.state_db()).unwrap();
+        conn.execute_batch("DROP TABLE IF EXISTS settings; PRAGMA user_version = 3;")
+            .unwrap();
+    }
+
+    let state = paths.state().unwrap();
+
+    assert_eq!(
+        state.var_consent(env, &var("PATH")).unwrap(),
+        Some(VarConsent { key_id, version: 2 })
+    );
+    assert!(state.auto_activate().unwrap());
+    state.set_auto_activate(false).unwrap();
+}

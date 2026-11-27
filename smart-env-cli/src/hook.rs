@@ -18,7 +18,9 @@ use smart_env_vault::{
 use crate::init::ask_yes;
 use crate::keys::device_key;
 use crate::reserved::{Consent, consent, is_reserved};
-use crate::{CliError, Context, Exit, FILE_NAME, Interaction, ProjectFile, Shell, ShellEnv};
+use crate::{
+    CliError, Context, EnvRef, Exit, FILE_NAME, Interaction, ProjectFile, Shell, ShellEnv,
+};
 
 /// Prints the hook script for `shell` to `out`.
 pub(crate) fn hook(ctx: &Context<'_>, shell: Shell, out: &mut dyn Write) -> Result<Exit, CliError> {
@@ -55,6 +57,57 @@ pub(crate) fn hook_env(
         let _ = writeln!(err, "smart-env: {message}");
     }
     Exit::Success
+}
+
+/// `hook-env <shell> --activate`, run by the shell function for
+/// `smart-env activate`: loads the environment (explicit consent, no
+/// `allow`) and keeps it until `deactivate`.
+///
+/// # Errors
+/// `not_set_up`, `project_file_*`, `environment_not_found`, `key_locked`…;
+/// the shell is left as it was.
+pub(crate) fn activate(
+    ctx: &mut Context<'_>,
+    shell: Shell,
+    env: Option<&EnvRef>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<Exit, CliError> {
+    let _ = (ctx, shell, env, out, err);
+    todo!("hook::activate")
+}
+
+/// `hook-env <shell> --deactivate`, run by the shell function for
+/// `smart-env deactivate`.
+///
+/// # Errors
+/// None in practice; kept for symmetry with `activate`.
+pub(crate) fn deactivate(
+    ctx: &mut Context<'_>,
+    shell: Shell,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<Exit, CliError> {
+    let _ = (ctx, shell, out, err);
+    todo!("hook::deactivate")
+}
+
+/// `smart-env activate` / `deactivate` run as a plain binary: only the
+/// shell function can change the shell.
+pub(crate) fn shell_function_required(command: &str) -> CliError {
+    let _ = command;
+    todo!("hook::shell_function_required")
+}
+
+/// `smart-env auto-activate on|off`.
+pub(crate) fn auto_activate(
+    ctx: &mut Context<'_>,
+    json: bool,
+    on: bool,
+    out: &mut dyn Write,
+) -> Result<Exit, CliError> {
+    let _ = (ctx, json, on, out);
+    todo!("hook::auto_activate")
 }
 
 /// Version of the hook state format.

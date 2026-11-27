@@ -391,6 +391,112 @@ fn the_hook_passes_its_state_to_hook_env_without_exporting_it() {
 }
 
 #[test]
+fn the_smart_env_function_runs_activate_in_this_shell_and_keeps_the_exit_code() {
+    for shell in ALL {
+        if !installed(shell) {
+            continue;
+        }
+        let m = Machine::new();
+        let file = hook_file(&m, shell);
+        fake_output(&m, export_line(shell));
+        std::fs::write(fake_dir(&m).join("exit"), "3").unwrap();
+        let status = if shell == Shell::Fish {
+            "$status"
+        } else {
+            "$?"
+        };
+        let script = format!(
+            "{source}\nsmart-env activate --env 'pay ments/dev'\necho \"rc=${status_var}\"\necho \"SE_TEST=$SE_TEST\"",
+            source = source(shell, &file),
+            status_var = &status[1..],
+        );
+
+        let (stdout, stderr, _) = run_shell(shell, &script);
+
+        assert_eq!(
+            calls(&m),
+            [format!(
+                "hook-env {} --activate --env pay ments/dev",
+                shell.name()
+            )],
+            "{}: {stderr}",
+            shell.name()
+        );
+        assert!(
+            stdout.contains("rc=3"),
+            "{}: {stdout}{stderr}",
+            shell.name()
+        );
+        assert!(stdout.contains("SE_TEST=a b"), "{}: {stdout}", shell.name());
+    }
+}
+
+#[test]
+fn the_smart_env_function_runs_deactivate_in_this_shell() {
+    for shell in ALL {
+        if !installed(shell) {
+            continue;
+        }
+        let m = Machine::new();
+        let file = hook_file(&m, shell);
+        fake_output(&m, export_line(shell));
+        let script = format!(
+            "{}\nsmart-env deactivate\necho \"SE_TEST=$SE_TEST\"",
+            source(shell, &file)
+        );
+
+        let (stdout, stderr, _) = run_shell(shell, &script);
+
+        assert_eq!(
+            calls(&m),
+            [format!("hook-env {} --deactivate", shell.name())],
+            "{}: {stderr}",
+            shell.name()
+        );
+        assert!(stdout.contains("SE_TEST=a b"), "{}: {stdout}", shell.name());
+    }
+}
+
+#[test]
+fn other_commands_go_to_the_binary_with_the_hook_state() {
+    for shell in ALL {
+        if !installed(shell) {
+            continue;
+        }
+        let m = Machine::new();
+        let file = hook_file(&m, shell);
+        fake_output(&m, "plain output\n");
+        std::fs::write(fake_dir(&m).join("exit"), "4").unwrap();
+        let set_state = match shell {
+            Shell::Fish => "set -g _smart_env_state 'state two'",
+            _ => "_smart_env_state='state two'",
+        };
+        let status = if shell == Shell::Fish { "status" } else { "?" };
+        let script = format!(
+            "{}\n{set_state}\nsmart-env status --json 'a b'\necho \"rc=${status}\"",
+            source(shell, &file)
+        );
+
+        let (stdout, stderr, _) = run_shell(shell, &script);
+
+        assert_eq!(
+            calls(&m),
+            ["status --json a b"],
+            "{}: {stderr}",
+            shell.name()
+        );
+        let states = std::fs::read_to_string(fake_dir(&m).join("states")).unwrap();
+        assert_eq!(states, "state two\n", "{}", shell.name());
+        assert!(
+            stdout.contains("plain output"),
+            "{}: {stdout}",
+            shell.name()
+        );
+        assert!(stdout.contains("rc=4"), "{}: {stdout}", shell.name());
+    }
+}
+
+#[test]
 fn bash_hook_keeps_the_existing_prompt_command_and_exit_status() {
     let shell = Shell::Bash;
     if !installed(shell) {

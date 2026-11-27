@@ -447,6 +447,18 @@ fn child_command_variables_override_inherited_ones() {
 }
 
 #[test]
+fn child_command_does_not_pass_the_hook_state_on() {
+    let command = child("env", &[], &[]).to_command();
+    let removed = command
+        .get_envs()
+        .any(|(name, value)| name == "SMART_ENV_HOOK_STATE" && value.is_none());
+    assert!(
+        removed,
+        "SMART_ENV_HOOK_STATE must be removed for the child"
+    );
+}
+
+#[test]
 fn child_command_passes_arguments_verbatim() {
     let output = child("printf", &["%s|%s", "a b", "$HOME"], &[])
         .to_command()

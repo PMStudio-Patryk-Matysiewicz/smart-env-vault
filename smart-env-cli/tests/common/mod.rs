@@ -2,6 +2,8 @@
 //! in-memory key stores and a scripted terminal.
 #![allow(dead_code)] // each test crate uses a different part
 
+pub mod session;
+
 use secrecy::{ExposeSecret, SecretString};
 use smart_env_cli::{ChildCommand, Context, Exit, Runner, ShellEnv, Terminal, execute};
 use smart_env_vault::{DataPaths, DeviceKey, KeyError, KeyStore, MemoryStore, Vault};
@@ -204,7 +206,8 @@ pub struct Machine {
     pub path: Option<OsString>,
     /// The `smart-env` binary the hook script calls: a fake in a directory
     /// with a space and a quote in its name. It appends its arguments to
-    /// `calls` next to it and prints the file `output` next to it.
+    /// `calls` and `SMART_ENV_HOOK_STATE` to `states` next to it, prints the
+    /// file `output` and exits with the code in `exit` (default 0).
     pub executable: PathBuf,
 }
 
@@ -214,6 +217,7 @@ dir=$(dirname "$0")
 printf '%s\n' "$*" >> "$dir/calls"
 printf '%s\n' "${SMART_ENV_HOOK_STATE-}" >> "$dir/states"
 if [ -f "$dir/output" ]; then cat "$dir/output"; fi
+if [ -f "$dir/exit" ]; then exit "$(cat "$dir/exit")"; fi
 "#;
 
 pub struct Run {

@@ -323,6 +323,25 @@ impl StateStore {
 }
 
 impl StateStore {
+    /// Whether the shell hook activates projects on `cd` (default: yes).
+    ///
+    /// # Errors
+    /// Storage errors.
+    pub fn auto_activate(&self) -> Result<bool, DataPathsError> {
+        todo!("StateStore::auto_activate")
+    }
+
+    /// Turns activation on `cd` on or off on this device.
+    ///
+    /// # Errors
+    /// Storage errors.
+    pub fn set_auto_activate(&self, on: bool) -> Result<(), DataPathsError> {
+        let _ = on;
+        todo!("StateStore::set_auto_activate")
+    }
+}
+
+impl StateStore {
     /// Consent for variable `name` in environment `env`, if any.
     ///
     /// # Errors

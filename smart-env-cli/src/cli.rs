@@ -6,7 +6,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::{
     CliError, Context, EnvRef, Exit, Interaction, Shell, hook, init, lock, reserved, run, setup,
-    trust, variables,
+    status, trust, variables,
 };
 
 /// `smart-env` command line.
@@ -46,6 +46,15 @@ pub enum InjectArg {
     Shell,
     /// Only `smart-env run`.
     Run,
+}
+
+/// `on` / `off` switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum OnOff {
+    /// Enabled.
+    On,
+    /// Disabled.
+    Off,
 }
 
 /// Commands of step 2 (Stage 1). Behaviour comes with each checklist item.
@@ -134,13 +143,33 @@ pub enum Command {
         #[arg(value_enum)]
         shell: Shell,
     },
-    /// Called by the shell hook at every prompt.
+    /// Called by the shell hook at every prompt, and by the shell function
+    /// for `activate` / `deactivate`.
     #[command(name = "hook-env", hide = true)]
     HookEnv {
         /// Shell the output is for.
         #[arg(value_enum)]
         shell: Shell,
+        /// Activate the environment explicitly (`smart-env activate`).
+        #[arg(long, conflicts_with = "deactivate")]
+        activate: bool,
+        /// Deactivate (`smart-env deactivate`).
+        #[arg(long)]
+        deactivate: bool,
     },
+    /// Load the environment's variables into this shell until deactivate.
+    Activate,
+    /// Put back the variables from before the activation.
+    Deactivate,
+    /// Turn loading on cd on or off on this device.
+    #[command(name = "auto-activate")]
+    AutoActivate {
+        /// on or off.
+        #[arg(value_enum)]
+        mode: OnOff,
+    },
+    /// What is active in this shell and why something is not.
+    Status,
 }
 
 impl Command {
@@ -162,6 +191,10 @@ impl Command {
             Self::Deny { .. } => "deny",
             Self::Hook { .. } => "hook",
             Self::HookEnv { .. } => "hook-env",
+            Self::Activate => "activate",
+            Self::Deactivate => "deactivate",
+            Self::AutoActivate { .. } => "auto-activate",
+            Self::Status => "status",
         }
     }
 }
@@ -261,7 +294,22 @@ fn dispatch(
         } => reserved::deny_var(ctx, json, env, name, out),
         Command::Deny { dir, var: None } => trust::deny(ctx, json, dir.as_deref(), out),
         Command::Hook { shell } => hook::hook(ctx, *shell, out),
-        Command::HookEnv { shell } => Ok(hook::hook_env(ctx, *shell, out, err)),
+        Command::HookEnv {
+            shell,
+            activate: true,
+            ..
+        } => hook::activate(ctx, *shell, env, out, err),
+        Command::HookEnv {
+            shell,
+            deactivate: true,
+            ..
+        } => hook::deactivate(ctx, *shell, out, err),
+        Command::HookEnv { shell, .. } => Ok(hook::hook_env(ctx, *shell, out, err)),
+        Command::Activate | Command::Deactivate => {
+            Err(hook::shell_function_required(cli.command.name()))
+        }
+        Command::AutoActivate { mode } => hook::auto_activate(ctx, json, *mode == OnOff::On, out),
+        Command::Status => status::status(ctx, json, out),
     }
 }
 

@@ -57,3 +57,109 @@ fn initialize_should_set_directory_permissions_to_owner_only() {
 
     assert_eq!(mode, 0o700);
 }
+
+// --- state: shell hook trust (allow / deny) ---
+
+use smart_env_vault::{DataPathsError, ProjectId, TrustDecision};
+use std::path::Path;
+
+fn allowed(byte: u8) -> TrustDecision {
+    TrustDecision::Allowed {
+        file_hash: [byte; 32],
+        project_id: "0b9e6d3c-5f1a-4c8e-9d2b-7a6e1f3c8b40"
+            .parse::<ProjectId>()
+            .unwrap(),
+    }
+}
+
+/// A state database as `setup` wrote it before schema 2: version only.
+fn state_v1(path: &Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.pragma_update(None, "user_version", 1).unwrap();
+}
+
+#[test]
+fn state_creates_a_missing_state_database() {
+    let temp = TempDir::new().unwrap();
+    let paths = DataPaths::from_root(temp.path().join("smart-env"));
+
+    let state = paths.state().unwrap();
+
+    assert!(paths.state_db().exists());
+    assert_eq!(state.trust(Path::new("/code/payments")).unwrap(), None);
+}
+
+#[test]
+fn trust_decisions_are_stored_per_directory_and_replaced() {
+    let temp = TempDir::new().unwrap();
+    let paths = DataPaths::from_root(temp.path().join("smart-env"));
+    let state = paths.state().unwrap();
+    let payments = Path::new("/code/payments");
+    let billing = Path::new("/code/billing");
+
+    state.set_trust(payments, &allowed(1)).unwrap();
+    state.set_trust(billing, &TrustDecision::Denied).unwrap();
+    assert_eq!(state.trust(payments).unwrap(), Some(allowed(1)));
+    assert_eq!(state.trust(billing).unwrap(), Some(TrustDecision::Denied));
+
+    state.set_trust(payments, &allowed(2)).unwrap();
+    state.set_trust(billing, &allowed(3)).unwrap();
+    let reopened = paths.state().unwrap();
+    assert_eq!(reopened.trust(payments).unwrap(), Some(allowed(2)));
+    assert_eq!(reopened.trust(billing).unwrap(), Some(allowed(3)));
+
+    state.set_trust(payments, &TrustDecision::Denied).unwrap();
+    assert_eq!(state.trust(payments).unwrap(), Some(TrustDecision::Denied));
+    assert_eq!(state.trust(Path::new("/code")).unwrap(), None);
+}
+
+#[test]
+fn paths_are_compared_exactly() {
+    let temp = TempDir::new().unwrap();
+    let state = DataPaths::from_root(temp.path().join("smart-env"))
+        .state()
+        .unwrap();
+    state
+        .set_trust(Path::new("/code/payments"), &allowed(1))
+        .unwrap();
+
+    for other in ["/code/payments/", "/code/Payments", "/code/payments/src"] {
+        assert_eq!(state.trust(Path::new(other)).unwrap(), None, "{other}");
+    }
+}
+
+#[test]
+fn state_schema_1_is_upgraded_in_place() {
+    let temp = TempDir::new().unwrap();
+    let paths = DataPaths::from_root(temp.path().join("smart-env"));
+    state_v1(paths.state_db());
+
+    let state = paths.state().unwrap();
+    state
+        .set_trust(Path::new("/code/payments"), &allowed(1))
+        .unwrap();
+
+    assert_eq!(
+        state.trust(Path::new("/code/payments")).unwrap(),
+        Some(allowed(1))
+    );
+    // initialize (setup) opens the upgraded file too.
+    paths.initialize().unwrap();
+}
+
+#[test]
+fn state_from_a_newer_version_is_refused() {
+    let temp = TempDir::new().unwrap();
+    let paths = DataPaths::from_root(temp.path().join("smart-env"));
+    state_v1(paths.state_db());
+    rusqlite::Connection::open(paths.state_db())
+        .unwrap()
+        .pragma_update(None, "user_version", 99)
+        .unwrap();
+
+    assert!(matches!(
+        paths.state(),
+        Err(DataPathsError::UnsupportedState)
+    ));
+}

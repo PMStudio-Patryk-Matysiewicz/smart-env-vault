@@ -2364,6 +2364,7 @@ dependencies = [
  "rpassword",
  "secrecy",
  "serde_json",
+ "sha2 0.11.1",
  "smart-env-vault",
  "tempfile",
  "toml_edit",

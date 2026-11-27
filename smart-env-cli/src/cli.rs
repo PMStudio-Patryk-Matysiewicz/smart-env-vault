@@ -5,7 +5,8 @@ use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::{
-    CliError, Context, EnvRef, Exit, Interaction, Shell, hook, init, lock, run, setup, variables,
+    CliError, Context, EnvRef, Exit, Interaction, Shell, hook, init, lock, run, setup, trust,
+    variables,
 };
 
 /// `smart-env` command line.
@@ -109,6 +110,16 @@ pub enum Command {
     Unlock,
     /// Forget the unlocked key.
     Lock,
+    /// Let the shell hook load this project here (until smart-env.toml changes).
+    Allow {
+        /// Project directory (default: the current one).
+        dir: Option<std::path::PathBuf>,
+    },
+    /// Never let the shell hook load this project here.
+    Deny {
+        /// Project directory (default: the current one).
+        dir: Option<std::path::PathBuf>,
+    },
     /// Shell integration script; `setup` adds it to the shell's startup file.
     Hook {
         /// Shell to print the script for.
@@ -139,6 +150,8 @@ impl Command {
             Self::Run { .. } => "run",
             Self::Unlock => "unlock",
             Self::Lock => "lock",
+            Self::Allow { .. } => "allow",
+            Self::Deny { .. } => "deny",
             Self::Hook { .. } => "hook",
             Self::HookEnv { .. } => "hook-env",
         }
@@ -231,6 +244,8 @@ fn dispatch(
         } => run::run(ctx, env, only, except, command, err),
         Command::Unlock => lock::unlock(ctx, json, out),
         Command::Lock => lock::lock(ctx, json, out),
+        Command::Allow { dir } => trust::allow(ctx, json, dir.as_deref(), out),
+        Command::Deny { dir } => trust::deny(ctx, json, dir.as_deref(), out),
         Command::Hook { shell } => hook::hook(ctx, *shell, out),
         Command::HookEnv { shell } => Ok(hook::hook_env(ctx, *shell, out, err)),
     }

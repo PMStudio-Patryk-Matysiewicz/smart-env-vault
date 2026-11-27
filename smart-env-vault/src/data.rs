@@ -1,4 +1,4 @@
-use crate::{Vault, VaultError};
+use crate::{ProjectId, Vault, VaultError};
 use rusqlite::{Connection, OpenFlags, ffi};
 use std::{
     fs::{OpenOptions, create_dir_all, remove_file},
@@ -126,6 +126,32 @@ impl DataPaths {
 
         Ok((vault, state))
     }
+
+    /// Opens the state database, creating it (and the directory) if it is
+    /// missing; an older schema is upgraded in place.
+    ///
+    /// # Errors
+    /// [`DataPathsError::UnsupportedState`] for a file that is not a
+    /// smart-env state database or comes from a newer version; I/O and
+    /// storage errors.
+    pub fn state(&self) -> Result<StateStore, DataPathsError> {
+        todo!("DataPaths::state")
+    }
+}
+
+/// What the user decided about loading a project directory in the shell
+/// hook (`smart-env allow` / `deny`), on this device.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TrustDecision {
+    /// Allowed for this exact `smart-env.toml` content.
+    Allowed {
+        /// SHA-256 of `smart-env.toml` when it was allowed.
+        file_hash: [u8; 32],
+        /// `project_id` from that file.
+        project_id: ProjectId,
+    },
+    /// Never load it (until allowed again).
+    Denied,
 }
 
 #[cfg(unix)]
@@ -172,6 +198,27 @@ impl StateStore {
             return Err(DataPathsError::UnsupportedState);
         }
         Ok(Self { _conn: conn })
+    }
+}
+
+impl StateStore {
+    /// The decision stored for the project directory `dir` (canonical
+    /// path), if any.
+    ///
+    /// # Errors
+    /// Storage errors.
+    pub fn trust(&self, dir: &Path) -> Result<Option<TrustDecision>, DataPathsError> {
+        let _ = dir;
+        todo!("StateStore::trust")
+    }
+
+    /// Stores `decision` for `dir`, replacing an earlier one.
+    ///
+    /// # Errors
+    /// Storage errors.
+    pub fn set_trust(&self, dir: &Path, decision: &TrustDecision) -> Result<(), DataPathsError> {
+        let _ = (dir, decision);
+        todo!("StateStore::set_trust")
     }
 }
 

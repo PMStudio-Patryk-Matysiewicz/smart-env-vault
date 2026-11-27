@@ -22,6 +22,7 @@ mod run;
 mod setup;
 mod shell;
 mod target;
+mod trust;
 mod variables;
 
 pub use cli::{Cli, Command, GlobalArgs, InjectArg, execute};
@@ -34,3 +35,4 @@ pub use interaction::Interaction;
 pub use keys::device_key;
 pub use project_file::{FILE_NAME, ProjectFile, ProjectFileError, ResolvedProject};
 pub use shell::{Shell, ShellEnv};
+pub use trust::{Trust, TrustStatus, check_trust};

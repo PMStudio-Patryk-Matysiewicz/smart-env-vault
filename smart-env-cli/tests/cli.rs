@@ -28,6 +28,8 @@ fn smart_env(args: &[&str]) -> Output {
         terminal: None,
         stdin: Box::new(std::io::empty()),
         runner: Box::new(smart_env_cli::ProcessRunner),
+        shell: smart_env_cli::ShellEnv::default(),
+        executable: None,
     };
     let exit = execute(argv, &mut ctx, &mut out, &mut err);
     Output {

@@ -11,6 +11,8 @@ use std::time::Duration;
 use secrecy::{ExposeSecret, SecretString};
 use smart_env_vault::{DataPaths, KernelKeyringStore, KeyStore, KeychainStore};
 
+use crate::ShellEnv;
+
 /// How long `unlock` keeps the device key in the kernel keyring (ADR-002).
 pub const UNLOCK_TTL: Duration = Duration::from_secs(8 * 60 * 60);
 
@@ -117,6 +119,11 @@ pub struct Context<'a> {
     pub stdin: Box<dyn Read + 'a>,
     /// Starts the command of `run`.
     pub runner: Box<dyn Runner + 'a>,
+    /// The user's shell and where its startup files are (hook installation).
+    pub shell: ShellEnv,
+    /// This `smart-env` binary, called by the hook script by its absolute
+    /// path; `None` if the system cannot tell.
+    pub executable: Option<PathBuf>,
 }
 
 /// Owns the real system resources a [`Context`] borrows.
@@ -128,6 +135,8 @@ pub struct System {
     device_label: String,
     current_dir: Option<PathBuf>,
     terminal: Option<StdTerminal>,
+    shell: ShellEnv,
+    executable: Option<PathBuf>,
 }
 
 impl System {
@@ -148,6 +157,8 @@ impl System {
             current_dir: std::env::current_dir().ok(),
             terminal: (io::stdin().is_terminal() && io::stderr().is_terminal())
                 .then_some(StdTerminal),
+            shell: ShellEnv::detect(),
+            executable: std::env::current_exe().ok(),
         }
     }
 
@@ -166,6 +177,8 @@ impl System {
                 .map(|terminal| terminal as &mut dyn Terminal),
             stdin: Box::new(io::stdin()),
             runner: Box::new(ProcessRunner),
+            shell: self.shell.clone(),
+            executable: self.executable.clone(),
         }
     }
 }

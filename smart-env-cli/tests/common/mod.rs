@@ -3,10 +3,11 @@
 #![allow(dead_code)] // each test crate uses a different part
 
 use secrecy::{ExposeSecret, SecretString};
-use smart_env_cli::{ChildCommand, Context, Exit, Runner, Terminal, execute};
+use smart_env_cli::{ChildCommand, Context, Exit, Runner, ShellEnv, Terminal, execute};
 use smart_env_vault::{DataPaths, DeviceKey, KeyError, KeyStore, MemoryStore, Vault};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -188,7 +189,29 @@ pub struct Machine {
     pub launched: Rc<RefCell<Vec<Launched>>>,
     /// How the next commands started by `run` end (default: exit 0).
     pub child: Cell<ChildResult>,
+    /// `$HOME`: an empty directory next to the data directory.
+    pub home: PathBuf,
+    /// `$SHELL`; `None` by default, so `setup` installs no hook unless a
+    /// test asks for it.
+    pub shell: Option<String>,
+    /// `$ZDOTDIR`.
+    pub zdotdir: Option<PathBuf>,
+    /// `$XDG_CONFIG_HOME`.
+    pub xdg_config_home: Option<PathBuf>,
+    /// `$PATH`: by default only the directory of [`Machine::executable`].
+    pub path: Option<OsString>,
+    /// The `smart-env` binary the hook script calls: a fake in a directory
+    /// with a space and a quote in its name. It appends its arguments to
+    /// `calls` next to it and prints the file `output` next to it.
+    pub executable: PathBuf,
 }
+
+/// Fake `smart-env` for hook scripts: logs its arguments, prints `output`.
+const FAKE_SMART_ENV: &str = r#"#!/bin/sh
+dir=$(dirname "$0")
+printf '%s\n' "$*" >> "$dir/calls"
+if [ -f "$dir/output" ]; then cat "$dir/output"; fi
+"#;
 
 pub struct Run {
     pub exit: Exit,
@@ -217,6 +240,16 @@ impl Machine {
         let data = dir.path().join("smart-env");
         let project = dir.path().join("payments");
         std::fs::create_dir(&project).unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let bin = dir.path().join("bin dir's");
+        std::fs::create_dir(&bin).unwrap();
+        let executable = bin.join("smart-env");
+        std::fs::write(&executable, FAKE_SMART_ENV).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         Self {
             _dir: dir,
             data,
@@ -227,6 +260,12 @@ impl Machine {
             device_label: "laptop".to_owned(),
             launched: Rc::default(),
             child: Cell::new(ChildResult::Exit(0)),
+            home,
+            shell: None,
+            zdotdir: None,
+            xdg_config_home: None,
+            path: Some(bin.into_os_string()),
+            executable,
         }
     }
 
@@ -244,6 +283,14 @@ impl Machine {
                 launched: Rc::clone(&self.launched),
                 result: self.child.get(),
             }),
+            shell: ShellEnv {
+                shell: self.shell.clone().map(OsString::from),
+                home: Some(self.home.clone()),
+                zdotdir: self.zdotdir.clone(),
+                xdg_config_home: self.xdg_config_home.clone(),
+                path: self.path.clone(),
+            },
+            executable: Some(self.executable.clone()),
         }
     }
 

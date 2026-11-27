@@ -4,7 +4,9 @@ use std::io::Write;
 use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::{CliError, Context, EnvRef, Exit, Interaction, init, lock, run, setup, variables};
+use crate::{
+    CliError, Context, EnvRef, Exit, Interaction, Shell, hook, init, lock, run, setup, variables,
+};
 
 /// `smart-env` command line.
 #[derive(Debug, Parser)]
@@ -107,6 +109,19 @@ pub enum Command {
     Unlock,
     /// Forget the unlocked key.
     Lock,
+    /// Shell integration script; `setup` adds it to the shell's startup file.
+    Hook {
+        /// Shell to print the script for.
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+    /// Called by the shell hook at every prompt.
+    #[command(name = "hook-env", hide = true)]
+    HookEnv {
+        /// Shell the output is for.
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }
 
 impl Command {
@@ -124,6 +139,8 @@ impl Command {
             Self::Run { .. } => "run",
             Self::Unlock => "unlock",
             Self::Lock => "lock",
+            Self::Hook { .. } => "hook",
+            Self::HookEnv { .. } => "hook-env",
         }
     }
 }
@@ -214,6 +231,8 @@ fn dispatch(
         } => run::run(ctx, env, only, except, command, err),
         Command::Unlock => lock::unlock(ctx, json, out),
         Command::Lock => lock::lock(ctx, json, out),
+        Command::Hook { shell } => hook::hook(ctx, *shell, out),
+        Command::HookEnv { shell } => Ok(hook::hook_env(ctx, *shell, out, err)),
     }
 }
 

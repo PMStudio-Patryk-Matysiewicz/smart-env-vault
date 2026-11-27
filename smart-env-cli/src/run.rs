@@ -3,7 +3,8 @@
 //! its exit code ([[05 - Kontrakt DX]] Scenario 1 without the hook, F06 4).
 //!
 //! Variables reach only the command, never its arguments, and never the
-//! shell. Reserved names (ADR-005) are skipped with a warning. stdout belongs
+//! shell. Reserved names (ADR-005) are skipped with a warning unless
+//! allowed at their current version (`smart-env allow --var`). stdout belongs
 //! to the command: `run` writes nothing there; warnings go to stderr.
 
 use std::collections::BTreeSet;
@@ -13,7 +14,7 @@ use secrecy::SecretString;
 use smart_env_vault::{SecretError, VarName, VaultError};
 
 use crate::keys::device_key;
-use crate::reserved::is_reserved;
+use crate::reserved::{Consent, consent, is_reserved};
 use crate::variables::env_flag;
 use crate::{ChildCommand, CliError, Context, EnvRef, Exit, target};
 
@@ -61,7 +62,10 @@ pub(crate) fn run(
         .with_hint(format!("List variables: smart-env ls{}", env_flag(env))));
     }
 
+    // Consent for reserved names lives in state.db (smart-env allow --var).
+    let state = ctx.data.as_ref().and_then(|data| data.state().ok());
     let mut skipped = Vec::new();
+    let mut changed = Vec::new();
     let mut child_env = Vec::new();
     for (meta, value) in variables {
         let name = meta.name.as_str();
@@ -69,8 +73,17 @@ pub(crate) fn run(
             continue;
         }
         if is_reserved(name) {
-            skipped.push(name.to_owned());
-            continue;
+            match consent(state.as_ref(), target.environment.id, &meta) {
+                Consent::Current => {}
+                Consent::Stale => {
+                    changed.push(name.to_owned());
+                    continue;
+                }
+                Consent::Missing => {
+                    skipped.push(name.to_owned());
+                    continue;
+                }
+            }
         }
         child_env.push((
             name.to_owned(),
@@ -96,6 +109,12 @@ pub(crate) fn run(
                 names.join(", ")
             );
         }
+    }
+    for name in &changed {
+        let _ = writeln!(
+            err,
+            "! {name} changed since you allowed it and was not passed. Allow the new value with: smart-env allow --var {name}"
+        );
     }
     let _ = err.flush();
 

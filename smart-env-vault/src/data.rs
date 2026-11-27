@@ -6,7 +6,7 @@ use std::{
 };
 use thiserror::Error;
 
-const STATE_SCHEMA_VERSION: i64 = 2;
+const STATE_SCHEMA_VERSION: i64 = 3;
 
 /// Schema 2: shell hook trust (`smart-env allow` / `deny`).
 const STATE_SCHEMA_2: &str = "
@@ -17,6 +17,18 @@ const STATE_SCHEMA_2: &str = "
         project_id TEXT,
         decided_at INTEGER NOT NULL,
         CHECK ((decision = 'allow') = (file_hash IS NOT NULL AND project_id IS NOT NULL))
+    ) STRICT;
+";
+
+/// Schema 3: consent to pass reserved names (`smart-env allow --var`).
+const STATE_SCHEMA_3: &str = "
+    CREATE TABLE var_consent (
+        environment_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        key_id TEXT NOT NULL,
+        version INTEGER NOT NULL CHECK (version >= 1),
+        decided_at INTEGER NOT NULL,
+        PRIMARY KEY (environment_id, name)
     ) STRICT;
 ";
 
@@ -216,6 +228,7 @@ impl StateStore {
         let mut conn = connect_state(path)?;
         let tx = conn.transaction()?;
         tx.execute_batch(STATE_SCHEMA_2)?;
+        tx.execute_batch(STATE_SCHEMA_3)?;
         tx.pragma_update(None, "user_version", STATE_SCHEMA_VERSION)?;
         tx.commit()?;
         Ok(Self { conn })
@@ -224,16 +237,21 @@ impl StateStore {
     fn open(path: &Path) -> Result<Self, DataPathsError> {
         let mut conn = connect_state(path)?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        match version {
-            STATE_SCHEMA_VERSION => {}
-            // Before release the format may change; schema 1 had no tables.
-            1 => {
-                let tx = conn.transaction()?;
-                tx.execute_batch(STATE_SCHEMA_2)?;
-                tx.pragma_update(None, "user_version", STATE_SCHEMA_VERSION)?;
-                tx.commit()?;
-            }
+        // Before release the format may still change: older schemas are
+        // upgraded in place (schema 1 had no tables).
+        let upgrades: &[&str] = match version {
+            STATE_SCHEMA_VERSION => &[],
+            1 => &[STATE_SCHEMA_2, STATE_SCHEMA_3],
+            2 => &[STATE_SCHEMA_3],
             _ => return Err(DataPathsError::UnsupportedState),
+        };
+        if !upgrades.is_empty() {
+            let tx = conn.transaction()?;
+            for schema in upgrades {
+                tx.execute_batch(schema)?;
+            }
+            tx.pragma_update(None, "user_version", STATE_SCHEMA_VERSION)?;
+            tx.commit()?;
         }
         Ok(Self { conn })
     }
@@ -291,11 +309,7 @@ impl StateStore {
             ),
             TrustDecision::Denied => ("deny", None, None),
         };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| {
-                i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
-            });
+        let now = unix_now();
         self.conn.execute(
             "INSERT INTO trust (path, decision, file_hash, project_id, decided_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -318,8 +332,24 @@ impl StateStore {
         env: EnvironmentId,
         name: &VarName,
     ) -> Result<Option<VarConsent>, DataPathsError> {
-        let _ = (env, name);
-        todo!("StateStore::var_consent")
+        let row = self
+            .conn
+            .query_row(
+                "SELECT key_id, version FROM var_consent
+                  WHERE environment_id = ?1 AND name = ?2",
+                rusqlite::params![env.to_string(), name.as_str()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        row.map(|(key_id, version)| {
+            Ok(VarConsent {
+                key_id: key_id
+                    .parse()
+                    .map_err(|_| DataPathsError::UnsupportedState)?,
+                version: u32::try_from(version).map_err(|_| DataPathsError::UnsupportedState)?,
+            })
+        })
+        .transpose()
     }
 
     /// Stores `consent` for `name` in `env`, replacing an earlier one.
@@ -332,8 +362,20 @@ impl StateStore {
         name: &VarName,
         consent: &VarConsent,
     ) -> Result<(), DataPathsError> {
-        let _ = (env, name, consent);
-        todo!("StateStore::set_var_consent")
+        self.conn.execute(
+            "INSERT INTO var_consent (environment_id, name, key_id, version, decided_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (environment_id, name) DO UPDATE SET key_id = excluded.key_id,
+                 version = excluded.version, decided_at = excluded.decided_at",
+            rusqlite::params![
+                env.to_string(),
+                name.as_str(),
+                consent.key_id.to_string(),
+                consent.version,
+                unix_now()
+            ],
+        )?;
+        Ok(())
     }
 
     /// Removes the consent for `name` in `env`; returns whether there was one.
@@ -345,9 +387,21 @@ impl StateStore {
         env: EnvironmentId,
         name: &VarName,
     ) -> Result<bool, DataPathsError> {
-        let _ = (env, name);
-        todo!("StateStore::remove_var_consent")
+        let removed = self.conn.execute(
+            "DELETE FROM var_consent WHERE environment_id = ?1 AND name = ?2",
+            rusqlite::params![env.to_string(), name.as_str()],
+        )?;
+        Ok(removed > 0)
     }
+}
+
+/// Seconds since the Unix epoch (0 if the clock is before it).
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
+        })
 }
 
 /// The exact bytes of a path (not UTF-8 on every system).

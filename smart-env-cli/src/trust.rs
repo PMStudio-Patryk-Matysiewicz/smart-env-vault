@@ -239,7 +239,7 @@ fn set_up(ctx: &Context<'_>) -> Result<DataPaths, CliError> {
     Ok(data)
 }
 
-fn state_error(error: DataPathsError) -> CliError {
+pub(crate) fn state_error(error: DataPathsError) -> CliError {
     match error {
         DataPathsError::Vault(error) => error.into(),
         DataPathsError::UnsupportedState => CliError::new(

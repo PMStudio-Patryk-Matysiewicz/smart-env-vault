@@ -594,7 +594,7 @@ fn warnings(target: &Target, reserved: Option<&VarName>) -> Vec<String> {
     let mut warnings = target.warnings.clone();
     if let Some(name) = reserved {
         warnings.push(format!(
-            "{name} is a reserved name. The shell hook skips it until allowed: smart-env allow --var {name}"
+            "{name} is a reserved name: smart-env run and the shell hook skip it until allowed: smart-env allow --var {name}"
         ));
     }
     warnings

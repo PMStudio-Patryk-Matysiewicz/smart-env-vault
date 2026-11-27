@@ -244,7 +244,7 @@ fn append_block(file: &Path, block: &str) -> std::io::Result<()> {
 }
 
 /// `~/…` under the home directory, the full path elsewhere.
-fn display(file: &Path, home: Option<&Path>) -> String {
+pub(crate) fn display(file: &Path, home: Option<&Path>) -> String {
     match home.and_then(|home| file.strip_prefix(home).ok()) {
         Some(rest) => format!("~/{}", rest.display()),
         None => file.display().to_string(),

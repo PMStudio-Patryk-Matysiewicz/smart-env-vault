@@ -129,6 +129,14 @@ pub(crate) fn run(
 
     write_project_file(&dir, &project, &project_id.to_string(), &default_env)?;
     report.line("✓ Created smart-env.toml (no secrets, safe to commit)");
+    // ADR-005: init is consent for this directory. A failure here must not
+    // fail an import that already succeeded.
+    match crate::trust::allow_project_dir(ctx, &dir) {
+        Ok(()) => report.line("✓ Allowed this directory for the shell hook"),
+        Err(_) => {
+            report.line("! Could not allow this directory for the shell hook. Run: smart-env allow")
+        }
+    }
 
     let files: Vec<String> = sources
         .iter()

@@ -1,12 +1,24 @@
 use crate::{ProjectId, Vault, VaultError};
-use rusqlite::{Connection, OpenFlags, ffi};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, ffi};
 use std::{
     fs::{OpenOptions, create_dir_all, remove_file},
     path::{Path, PathBuf},
 };
 use thiserror::Error;
 
-const STATE_SCHEMA_VERSION: i64 = 1;
+const STATE_SCHEMA_VERSION: i64 = 2;
+
+/// Schema 2: shell hook trust (`smart-env allow` / `deny`).
+const STATE_SCHEMA_2: &str = "
+    CREATE TABLE trust (
+        path BLOB PRIMARY KEY,
+        decision TEXT NOT NULL CHECK (decision IN ('allow', 'deny')),
+        file_hash BLOB CHECK (file_hash IS NULL OR length(file_hash) = 32),
+        project_id TEXT,
+        decided_at INTEGER NOT NULL,
+        CHECK ((decision = 'allow') = (file_hash IS NOT NULL AND project_id IS NOT NULL))
+    ) STRICT;
+";
 
 /// Errors while locating or initializing smart-env application data.
 #[derive(Debug, Error)]
@@ -135,7 +147,14 @@ impl DataPaths {
     /// smart-env state database or comes from a newer version; I/O and
     /// storage errors.
     pub fn state(&self) -> Result<StateStore, DataPathsError> {
-        todo!("DataPaths::state")
+        create_dir_all(&self.directory).map_err(DataPathsError::Io)?;
+        #[cfg(unix)]
+        set_directory_mode(&self.directory)?;
+        if self.state_db.exists() {
+            StateStore::open(&self.state_db)
+        } else {
+            StateStore::create(&self.state_db)
+        }
     }
 }
 
@@ -163,7 +182,7 @@ fn set_directory_mode(directory: &Path) -> Result<(), DataPathsError> {
 
 /// The local state database, kept separate from portable vault data.
 pub struct StateStore {
-    _conn: Connection,
+    conn: Connection,
 }
 
 impl StateStore {
@@ -186,18 +205,27 @@ impl StateStore {
     fn initialize(path: &Path) -> Result<Self, DataPathsError> {
         let mut conn = connect_state(path)?;
         let tx = conn.transaction()?;
+        tx.execute_batch(STATE_SCHEMA_2)?;
         tx.pragma_update(None, "user_version", STATE_SCHEMA_VERSION)?;
         tx.commit()?;
-        Ok(Self { _conn: conn })
+        Ok(Self { conn })
     }
 
     fn open(path: &Path) -> Result<Self, DataPathsError> {
-        let conn = connect_state(path)?;
+        let mut conn = connect_state(path)?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version != STATE_SCHEMA_VERSION {
-            return Err(DataPathsError::UnsupportedState);
+        match version {
+            STATE_SCHEMA_VERSION => {}
+            // Before release the format may change; schema 1 had no tables.
+            1 => {
+                let tx = conn.transaction()?;
+                tx.execute_batch(STATE_SCHEMA_2)?;
+                tx.pragma_update(None, "user_version", STATE_SCHEMA_VERSION)?;
+                tx.commit()?;
+            }
+            _ => return Err(DataPathsError::UnsupportedState),
         }
-        Ok(Self { _conn: conn })
+        Ok(Self { conn })
     }
 }
 
@@ -208,8 +236,33 @@ impl StateStore {
     /// # Errors
     /// Storage errors.
     pub fn trust(&self, dir: &Path) -> Result<Option<TrustDecision>, DataPathsError> {
-        let _ = dir;
-        todo!("StateStore::trust")
+        let row = self
+            .conn
+            .query_row(
+                "SELECT decision, file_hash, project_id FROM trust WHERE path = ?1",
+                [path_key(dir)],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<Vec<u8>>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((decision, file_hash, project_id)) = row else {
+            return Ok(None);
+        };
+        match (decision.as_str(), file_hash, project_id) {
+            ("deny", _, _) => Ok(Some(TrustDecision::Denied)),
+            ("allow", Some(hash), Some(id)) => Ok(Some(TrustDecision::Allowed {
+                file_hash: hash
+                    .try_into()
+                    .map_err(|_| DataPathsError::UnsupportedState)?,
+                project_id: id.parse().map_err(|_| DataPathsError::UnsupportedState)?,
+            })),
+            _ => Err(DataPathsError::UnsupportedState),
+        }
     }
 
     /// Stores `decision` for `dir`, replacing an earlier one.
@@ -217,8 +270,44 @@ impl StateStore {
     /// # Errors
     /// Storage errors.
     pub fn set_trust(&self, dir: &Path, decision: &TrustDecision) -> Result<(), DataPathsError> {
-        let _ = (dir, decision);
-        todo!("StateStore::set_trust")
+        let (kind, file_hash, project_id) = match decision {
+            TrustDecision::Allowed {
+                file_hash,
+                project_id,
+            } => (
+                "allow",
+                Some(file_hash.to_vec()),
+                Some(project_id.to_string()),
+            ),
+            TrustDecision::Denied => ("deny", None, None),
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| {
+                i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
+            });
+        self.conn.execute(
+            "INSERT INTO trust (path, decision, file_hash, project_id, decided_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (path) DO UPDATE SET decision = excluded.decision,
+                 file_hash = excluded.file_hash, project_id = excluded.project_id,
+                 decided_at = excluded.decided_at",
+            rusqlite::params![path_key(dir), kind, file_hash, project_id, now],
+        )?;
+        Ok(())
+    }
+}
+
+/// The exact bytes of a path (not UTF-8 on every system).
+fn path_key(dir: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        dir.as_os_str().as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        dir.to_string_lossy().into_owned().into_bytes()
     }
 }
 

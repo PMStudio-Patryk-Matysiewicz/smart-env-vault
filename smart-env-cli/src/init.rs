@@ -592,7 +592,7 @@ fn git_history(dir: &Path, files: &[String]) -> Vec<History> {
 // --- interaction and output ---
 
 /// `[Y/n]`: an empty answer, `y` or `yes` is yes; a closed terminal is no.
-fn ask_yes(ctx: &mut Context<'_>, question: &str) -> bool {
+pub(crate) fn ask_yes(ctx: &mut Context<'_>, question: &str) -> bool {
     let Some(terminal) = ctx.terminal.as_deref_mut() else {
         return false;
     };

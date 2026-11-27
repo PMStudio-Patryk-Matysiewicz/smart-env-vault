@@ -20,9 +20,18 @@ fn ok(run: Run) -> Run {
     run
 }
 
+/// The program for `shell`: `SMART_ENV_TEST_<SHELL>` if set (e.g.
+/// `SMART_ENV_TEST_BASH=/bin/bash` for bash 3.2 on macOS), else from `PATH`.
+fn program(shell: Shell) -> String {
+    std::env::var(format!("SMART_ENV_TEST_{}", shell.name().to_uppercase()))
+        .ok()
+        .filter(|program| !program.is_empty())
+        .unwrap_or_else(|| shell.name().to_owned())
+}
+
 /// Whether `shell` is installed; prints a note when it is not.
 fn installed(shell: Shell) -> bool {
-    let found = Command::new(shell.name())
+    let found = Command::new(program(shell))
         .args(["-c", "exit 0"])
         .output()
         .is_ok_and(|output| output.status.success());
@@ -34,7 +43,7 @@ fn installed(shell: Shell) -> bool {
 
 /// Runs `script` in `shell` without any startup files.
 fn run_shell(shell: Shell, script: &str) -> (String, String, Option<i32>) {
-    let mut command = Command::new(shell.name());
+    let mut command = Command::new(program(shell));
     match shell {
         Shell::Bash => command.args(["--norc", "--noprofile", "-c", script]),
         Shell::Zsh => command.args(["-f", "-c", script]),
@@ -290,7 +299,7 @@ fn hook_script_has_valid_syntax() {
             continue;
         }
         let file = hook_file(&m, shell);
-        let status = Command::new(shell.name())
+        let status = Command::new(program(shell))
             .arg("-n")
             .arg(&file)
             .status()
@@ -436,7 +445,7 @@ fn binary_hook_script_works_in_bash_and_is_silent_without_setup() {
          false; _smart_env_hook; echo \"status=$?\"",
         Shell::Bash.quote(exe)
     );
-    let output = Command::new("bash")
+    let output = Command::new(program(Shell::Bash))
         .args(["--norc", "--noprofile", "-c", &script])
         .current_dir(home.path())
         .env("HOME", home.path())
@@ -466,7 +475,9 @@ fn setup_adds_the_hook_to_bashrc_after_yes() {
     let content = read(&bashrc(&m));
     assert_eq!(hook_lines(&content, Shell::Bash), 1, "{content}");
     assert!(
-        content.contains("command -v smart-env >/dev/null 2>&1 && eval \"$(smart-env hook bash)\""),
+        content.contains(
+            "if [ -n \"$BASH_VERSION\" ] && command -v smart-env >/dev/null 2>&1; then eval \"$(smart-env hook bash)\"; fi"
+        ),
         "{content}"
     );
     assert!(content.contains("# smart-env"), "{content}");
@@ -638,7 +649,7 @@ fn existing_content_is_kept_and_the_block_starts_on_a_new_line() {
     assert!(
         content
             .lines()
-            .any(|l| l.starts_with("command -v smart-env")),
+            .any(|l| l.starts_with("if [ -n \"$BASH_VERSION\" ] && command -v smart-env")),
         "{content:?}"
     );
     assert!(content.ends_with('\n'), "{content:?}");
@@ -678,7 +689,9 @@ fn zsh_hook_goes_to_zdotdir_when_set() {
 
     let content = read(&zdotdir.join(".zshrc"));
     assert!(
-        content.contains("command -v smart-env >/dev/null 2>&1 && eval \"$(smart-env hook zsh)\""),
+        content.contains(
+            "if command -v smart-env >/dev/null 2>&1; then eval \"$(smart-env hook zsh)\"; fi"
+        ),
         "{content}"
     );
     assert!(!m.home.join(".zshrc").exists());
@@ -770,11 +783,165 @@ fn bash_and_zsh_hook_lines_are_valid_and_quiet_without_smart_env_in_path() {
             Shell::Bash => bashrc(&m),
             _ => m.home.join(".zshrc"),
         };
-        let script = format!("PATH=/nonexistent\n{}\necho done", source(shell, &file));
+        let script = format!(
+            "PATH=/nonexistent\n{}\necho \"done $?\"",
+            source(shell, &file)
+        );
         let (stdout, stderr, _) = run_shell(shell, &script);
-        assert_eq!(stdout, "done\n", "{}: {stderr}", shell.name());
+        assert_eq!(stdout, "done 0\n", "{}: {stderr}", shell.name());
         assert!(stderr.is_empty(), "{}: {stderr}", shell.name());
     }
+}
+
+// --- setup: bash on macOS ---
+
+/// bash on macOS: Terminal.app and iTerm start login shells, which read
+/// the first of ~/.bash_profile, ~/.bash_login, ~/.profile, never ~/.bashrc.
+fn mac_bash() -> Machine {
+    let mut m = with_shell("/bin/bash");
+    m.macos = true;
+    m
+}
+
+#[test]
+fn macos_bash_hook_goes_to_a_new_bash_profile() {
+    let m = mac_bash();
+
+    let (run, terminal) = setup(&m, &[], "y");
+
+    assert!(
+        terminal.transcript.contains("~/.bash_profile"),
+        "{}",
+        terminal.transcript
+    );
+    assert_eq!(
+        hook_lines(&read(&m.home.join(".bash_profile")), Shell::Bash),
+        1
+    );
+    assert!(!bashrc(&m).exists());
+    assert!(
+        run.stdout.contains("✓ Shell hook added to ~/.bash_profile"),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn macos_bash_hook_goes_to_the_login_file_bash_reads() {
+    // Creating ~/.bash_profile would hide ~/.bash_login and ~/.profile.
+    for (existing, expected) in [
+        (&[".bash_profile", ".profile"][..], ".bash_profile"),
+        (&[".bash_login", ".profile"][..], ".bash_login"),
+        (&[".profile"][..], ".profile"),
+    ] {
+        let m = mac_bash();
+        for file in existing {
+            std::fs::write(m.home.join(file), "export A=1\n").unwrap();
+        }
+
+        setup(&m, &["--yes"], "y");
+
+        for file in existing {
+            let content = read(&m.home.join(file));
+            let want = usize::from(*file == expected);
+            assert_eq!(
+                hook_lines(&content, Shell::Bash),
+                want,
+                "{existing:?} {file}"
+            );
+            assert!(content.starts_with("export A=1\n"), "{content}");
+        }
+        assert_eq!(
+            m.home.join(".bash_profile").exists(),
+            existing.contains(&".bash_profile"),
+            "{existing:?}"
+        );
+    }
+}
+
+#[test]
+fn bash_hook_line_runs_only_in_bash() {
+    // ~/.profile is also read by sh.
+    let m = mac_bash();
+    std::fs::write(m.home.join(".profile"), "").unwrap();
+    setup(&m, &["--yes"], "y");
+    let content = read(&m.home.join(".profile"));
+    assert!(
+        content.contains("if [ -n \"$BASH_VERSION\" ] && command -v smart-env"),
+        "{content}"
+    );
+}
+
+#[test]
+fn sh_reading_the_profile_skips_the_hook_quietly() {
+    // dash is a plain sh; on many systems /bin/sh is bash in disguise.
+    let available = Command::new("dash")
+        .args(["-c", "exit 0"])
+        .status()
+        .is_ok_and(|status| status.success());
+    if !available {
+        eprintln!("skipped: dash is not installed");
+        return;
+    }
+    let m = mac_bash();
+    std::fs::write(m.home.join(".profile"), "export A=1\n").unwrap();
+    setup(&m, &["--yes"], "y");
+    let script = format!(
+        "PATH={}:$PATH\n. {}\necho \"done $?\"",
+        Shell::Bash.quote(fake_dir(&m).to_str().unwrap()),
+        Shell::Bash.quote(m.home.join(".profile").to_str().unwrap()),
+    );
+
+    let output = Command::new("dash").args(["-c", &script]).output().unwrap();
+
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "done 0\n");
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(calls(&m).is_empty(), "{:?}", calls(&m));
+}
+
+#[test]
+fn macos_bash_hook_already_in_the_login_file_is_present() {
+    let m = mac_bash();
+    std::fs::write(
+        m.home.join(".bash_profile"),
+        "eval \"$(smart-env hook bash)\"\n",
+    )
+    .unwrap();
+
+    let (run, terminal) = setup(&m, &[], "y");
+
+    assert_eq!(hook_questions(&terminal), 0);
+    assert!(
+        run.stdout.contains("already in ~/.bash_profile"),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn linux_bash_ignores_login_files() {
+    let m = with_shell("/bin/bash");
+    std::fs::write(m.home.join(".bash_profile"), "").unwrap();
+    setup(&m, &["--yes"], "y");
+    assert_eq!(hook_lines(&read(&bashrc(&m)), Shell::Bash), 1);
+    assert_eq!(read(&m.home.join(".bash_profile")), "");
+}
+
+#[test]
+fn macos_zsh_and_fish_use_the_same_files_as_linux() {
+    let mut m = with_shell("/bin/zsh");
+    m.macos = true;
+    setup(&m, &["--yes"], "y");
+    assert_eq!(hook_lines(&read(&m.home.join(".zshrc")), Shell::Zsh), 1);
+
+    let mut m = with_shell("/opt/homebrew/bin/fish");
+    m.macos = true;
+    setup(&m, &["--yes"], "y");
+    assert!(m.home.join(".config/fish/conf.d/smart-env.fish").exists());
 }
 
 // --- setup: no hook possible ---

@@ -13,7 +13,11 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -21,8 +25,14 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
-      - name: Shells for hook tests
-        run: sudo apt-get update && sudo apt-get install -y zsh fish
+      - name: Shells for hook tests (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh fish dash
+
+      - name: Shells for hook tests (macOS)
+        if: runner.os == 'macOS'
+        # zsh, dash and bash 3.2 (/bin/bash) come with macOS.
+        run: brew install fish
 
       - name: Format
         run: cargo fmt --all --check
@@ -32,3 +42,6 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --locked
+        env:
+          # macOS: test the system bash 3.2, not a newer one from Homebrew.
+          SMART_ENV_TEST_BASH: ${{ runner.os == 'macOS' && '/bin/bash' || '' }}

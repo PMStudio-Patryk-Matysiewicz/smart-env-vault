@@ -198,6 +198,8 @@ pub struct Machine {
     pub zdotdir: Option<PathBuf>,
     /// `$XDG_CONFIG_HOME`.
     pub xdg_config_home: Option<PathBuf>,
+    /// Whether the machine is a Mac (bash reads login files there).
+    pub macos: bool,
     /// `$PATH`: by default only the directory of [`Machine::executable`].
     pub path: Option<OsString>,
     /// The `smart-env` binary the hook script calls: a fake in a directory
@@ -264,6 +266,7 @@ impl Machine {
             shell: None,
             zdotdir: None,
             xdg_config_home: None,
+            macos: false,
             path: Some(bin.into_os_string()),
             executable,
         }
@@ -289,6 +292,7 @@ impl Machine {
                 zdotdir: self.zdotdir.clone(),
                 xdg_config_home: self.xdg_config_home.clone(),
                 path: self.path.clone(),
+                macos: self.macos,
             },
             executable: Some(self.executable.clone()),
         }

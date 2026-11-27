@@ -15,6 +15,7 @@ use smart_env_vault::{
 };
 use zeroize::Zeroizing;
 
+use crate::hook::{self, Installed};
 use crate::keys::{device_key_missing, key_error, no_data_directory};
 use crate::lock::unlocked_line;
 use crate::{CliError, Context, Exit, Interaction, Terminal};
@@ -51,7 +52,7 @@ enum NewKey {
 /// `--yes` changes nothing: the recovery key is always confirmed by typing.
 pub(crate) fn run(
     ctx: &mut Context<'_>,
-    _interaction: Interaction,
+    interaction: Interaction,
     json: bool,
     out: &mut dyn Write,
 ) -> Result<Exit, CliError> {
@@ -75,11 +76,15 @@ pub(crate) fn run(
                 file_exists: false, ..
             } => return Err(key_error(KeyError::KeychainUnavailable)),
         }
-        report(out, json, "already_configured", &data, || {
-            vec![format!(
+        let hook = hook::install(ctx, interaction);
+        let hook_lines = hook.lines(ctx.shell.home.as_deref(), hook::in_path(&ctx.shell));
+        report(out, json, "already_configured", &data, &hook, || {
+            let mut lines = vec![format!(
                 "✓ smart-env is already set up on this device ({})",
                 data.directory().display()
-            )]
+            )];
+            lines.extend(hook_lines);
+            lines
         });
         return Ok(Exit::Success);
     }
@@ -132,7 +137,11 @@ pub(crate) fn run(
         return Err(error);
     }
 
-    report(out, json, "created", &data, || {
+    // After the vault exists: a startup file that cannot be written must
+    // not undo the setup.
+    let hook = hook::install(ctx, interaction);
+    let hook_lines = hook.lines(ctx.shell.home.as_deref(), hook::in_path(&ctx.shell));
+    report(out, json, "created", &data, &hook, || {
         let mut lines = match new_key {
             Some(NewKey::Keychain) => vec!["✓ Device key saved in the system keychain".to_owned()],
             Some(NewKey::File(_)) => vec![
@@ -145,6 +154,7 @@ pub(crate) fn run(
             None => vec!["✓ Using the device key saved earlier on this device".to_owned()],
         };
         lines.push(format!("✓ Vault created ({})", data.directory().display()));
+        lines.extend(hook_lines);
         lines.push("Next, in your project directory: smart-env init".to_owned());
         lines
     });
@@ -314,6 +324,7 @@ fn report(
     json: bool,
     status: &str,
     data: &DataPaths,
+    hook: &Installed,
     lines: impl FnOnce() -> Vec<String>,
 ) {
     let _ = if json {
@@ -323,6 +334,7 @@ fn report(
             serde_json::json!({
                 "status": status,
                 "data_dir": data.directory().display().to_string(),
+                "hook": hook.to_json(),
             })
         )
     } else {

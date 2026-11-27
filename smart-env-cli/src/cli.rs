@@ -216,8 +216,11 @@ where
     T: Into<OsString> + Clone,
 {
     let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
-    let json = json_requested(&args);
-    let result = match Cli::try_parse_from(&args) {
+    let parsed = Cli::try_parse_from(&args);
+    // The shell evaluates what hook-env prints: errors always go to stderr.
+    let json = json_requested(&args)
+        && !matches!(&parsed, Ok(cli) if matches!(cli.command, Command::HookEnv { .. }));
+    let result = match parsed {
         Ok(cli) => {
             let interaction = Interaction::detect(cli.global.yes, ctx.terminal.is_some());
             dispatch(&cli, ctx, interaction, json, out, err)

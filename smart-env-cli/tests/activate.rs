@@ -166,7 +166,9 @@ fn after_deactivate_the_hook_leaves_the_project_alone_until_you_leave_it() {
         s.quiet(&p.payments.join("."));
         assert_eq!(s.var("API_KEY"), None, "{}", shell.name());
 
-        s.quiet(&p.home);
+        // Leaving drops the deactivated marker; the user sees nothing.
+        let left = s.prompt(&p.home);
+        assert_eq!(left.stderr, "", "{}", shell.name());
         let prompt = s.prompt(&p.payments);
         assert_eq!(
             prompt.stderr,

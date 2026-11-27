@@ -6,7 +6,7 @@ use std::{
 };
 use thiserror::Error;
 
-const STATE_SCHEMA_VERSION: i64 = 3;
+const STATE_SCHEMA_VERSION: i64 = 4;
 
 /// Schema 2: shell hook trust (`smart-env allow` / `deny`).
 const STATE_SCHEMA_2: &str = "
@@ -17,6 +17,14 @@ const STATE_SCHEMA_2: &str = "
         project_id TEXT,
         decided_at INTEGER NOT NULL,
         CHECK ((decision = 'allow') = (file_hash IS NOT NULL AND project_id IS NOT NULL))
+    ) STRICT;
+";
+
+/// Schema 4: device settings (`smart-env auto-activate`).
+const STATE_SCHEMA_4: &str = "
+    CREATE TABLE settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
     ) STRICT;
 ";
 
@@ -229,6 +237,7 @@ impl StateStore {
         let tx = conn.transaction()?;
         tx.execute_batch(STATE_SCHEMA_2)?;
         tx.execute_batch(STATE_SCHEMA_3)?;
+        tx.execute_batch(STATE_SCHEMA_4)?;
         tx.pragma_update(None, "user_version", STATE_SCHEMA_VERSION)?;
         tx.commit()?;
         Ok(Self { conn })
@@ -241,8 +250,9 @@ impl StateStore {
         // upgraded in place (schema 1 had no tables).
         let upgrades: &[&str] = match version {
             STATE_SCHEMA_VERSION => &[],
-            1 => &[STATE_SCHEMA_2, STATE_SCHEMA_3],
-            2 => &[STATE_SCHEMA_3],
+            1 => &[STATE_SCHEMA_2, STATE_SCHEMA_3, STATE_SCHEMA_4],
+            2 => &[STATE_SCHEMA_3, STATE_SCHEMA_4],
+            3 => &[STATE_SCHEMA_4],
             _ => return Err(DataPathsError::UnsupportedState),
         };
         if !upgrades.is_empty() {
@@ -328,7 +338,15 @@ impl StateStore {
     /// # Errors
     /// Storage errors.
     pub fn auto_activate(&self) -> Result<bool, DataPathsError> {
-        todo!("StateStore::auto_activate")
+        let value = self
+            .conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'auto_activate'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(value.as_deref() != Some("off"))
     }
 
     /// Turns activation on `cd` on or off on this device.
@@ -336,8 +354,12 @@ impl StateStore {
     /// # Errors
     /// Storage errors.
     pub fn set_auto_activate(&self, on: bool) -> Result<(), DataPathsError> {
-        let _ = on;
-        todo!("StateStore::set_auto_activate")
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('auto_activate', ?1)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            [if on { "on" } else { "off" }],
+        )?;
+        Ok(())
     }
 }
 

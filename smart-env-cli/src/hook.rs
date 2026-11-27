@@ -2,8 +2,9 @@
 //! `smart-env hook-env <shell>` it calls at every prompt, and installing the
 //! hook in the shell's startup file during `setup` (ADR-005).
 //!
-//! What `hook-env` does inside a project (activation, restoring, changes from
-//! another tab) comes with the "mechanics" item of step 3.
+//! `hook-env --activate` / `--deactivate` serve the `smart-env activate` /
+//! `deactivate` shell function; `smart-env auto-activate on|off` turns
+//! loading on `cd` on or off.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -12,12 +13,16 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use smart_env_vault::{
-    DataPaths, EnvironmentId, Inject, KeyId, SecretValue, TrustDecision, Vault, VaultError,
+    DataPaths, DeviceKey, EnvironmentId, Inject, KeyId, SecretValue, StateStore, TrustDecision,
+    Vault, VaultError,
 };
 
 use crate::init::ask_yes;
-use crate::keys::device_key;
+use crate::keys::{device_key, no_data_directory, not_set_up};
+use crate::project_file::ProjectFileError;
 use crate::reserved::{Consent, consent, is_reserved};
+use crate::target;
+use crate::trust::state_error;
 use crate::{
     CliError, Context, EnvRef, Exit, FILE_NAME, Interaction, ProjectFile, Shell, ShellEnv,
 };
@@ -46,16 +51,9 @@ pub(crate) fn hook_env(
     err: &mut dyn Write,
 ) -> Exit {
     let previous = ctx.hook_state.as_deref().and_then(State::parse);
-    let mut step = Step {
-        shell,
-        code: String::new(),
-        messages: Vec::new(),
-    };
+    let mut step = Step::new(shell);
     step.run(ctx, previous.as_ref());
-    let _ = out.write_all(step.code.as_bytes());
-    for message in &step.messages {
-        let _ = writeln!(err, "smart-env: {message}");
-    }
+    step.write(out, err);
     Exit::Success
 }
 
@@ -65,7 +63,7 @@ pub(crate) fn hook_env(
 ///
 /// # Errors
 /// `not_set_up`, `project_file_*`, `environment_not_found`, `key_locked`…;
-/// the shell is left as it was.
+/// nothing is printed to stdout, so the shell is left as it was.
 pub(crate) fn activate(
     ctx: &mut Context<'_>,
     shell: Shell,
@@ -73,12 +71,36 @@ pub(crate) fn activate(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<Exit, CliError> {
-    let _ = (ctx, shell, env, out, err);
-    todo!("hook::activate")
+    let previous = ctx.hook_state.as_deref().and_then(State::parse);
+    let (vault, target) = target::resolve(ctx, env)?;
+    let key = device_key(ctx)?;
+    let data = ctx.data.clone().ok_or_else(no_data_directory)?;
+    let consents = data.state().ok();
+    let mut step = Step::new(shell);
+    let (revision, loaded) =
+        step.decrypt(&vault, target.environment.id, &key, consents.as_ref())?;
+    step.activate(
+        previous.as_ref(),
+        State {
+            dir: String::new(),
+            hash: String::new(),
+            label: target.label(),
+            kind: StateKind::Active {
+                env: target.environment.id,
+                revision,
+                manual: true,
+                vars: Vec::new(),
+            },
+        },
+        loaded,
+    );
+    step.write(out, err);
+    Ok(Exit::Success)
 }
 
 /// `hook-env <shell> --deactivate`, run by the shell function for
-/// `smart-env deactivate`.
+/// `smart-env deactivate`. The project in the current directory stays
+/// unloaded until the shell leaves it.
 ///
 /// # Errors
 /// None in practice; kept for symmetry with `activate`.
@@ -88,15 +110,49 @@ pub(crate) fn deactivate(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<Exit, CliError> {
-    let _ = (ctx, shell, out, err);
-    todo!("hook::deactivate")
+    let previous = ctx.hook_state.as_deref().and_then(State::parse);
+    let mut step = Step::new(shell);
+    match previous.as_ref() {
+        Some(
+            state @ State {
+                kind: StateKind::Active { .. },
+                ..
+            },
+        ) => {
+            step.messages
+                .push(format!("restored environment from before {}", state.label));
+            step.restore(previous.as_ref());
+            match ctx.current_dir.as_deref().and_then(Found::nearest) {
+                Some(found) => {
+                    let (dir, hash) = found.key();
+                    let marker = State {
+                        dir,
+                        hash,
+                        label: state.label.clone(),
+                        kind: StateKind::Blocked {
+                            reason: DEACTIVATED.to_owned(),
+                        },
+                    };
+                    step.code.push_str(&shell.set_state(&marker.to_json()));
+                }
+                None => step.code.push_str(&shell.clear_state()),
+            }
+        }
+        _ => step.messages.push("nothing is active".to_owned()),
+    }
+    step.write(out, err);
+    Ok(Exit::Success)
 }
 
 /// `smart-env activate` / `deactivate` run as a plain binary: only the
 /// shell function can change the shell.
 pub(crate) fn shell_function_required(command: &str) -> CliError {
-    let _ = command;
-    todo!("hook::shell_function_required")
+    CliError::new(
+        "shell_function_required",
+        Exit::Usage,
+        format!("smart-env {command} changes your shell, so it needs the shell function."),
+    )
+    .with_hint("Load it: eval \"$(smart-env hook bash)\", or add it for good: smart-env setup")
 }
 
 /// `smart-env auto-activate on|off`.
@@ -106,32 +162,56 @@ pub(crate) fn auto_activate(
     on: bool,
     out: &mut dyn Write,
 ) -> Result<Exit, CliError> {
-    let _ = (ctx, json, on, out);
-    todo!("hook::auto_activate")
+    let data = ctx.data.clone().ok_or_else(no_data_directory)?;
+    if !data.vault_db().exists() {
+        return Err(not_set_up());
+    }
+    data.state()
+        .map_err(state_error)?
+        .set_auto_activate(on)
+        .map_err(state_error)?;
+    let _ = if json {
+        writeln!(out, "{}", json!({ "auto_activate": on }))
+    } else if on {
+        writeln!(out, "✓ Auto-activation on")
+    } else {
+        writeln!(
+            out,
+            "✓ Auto-activation off. Load variables with: smart-env activate"
+        )
+    };
+    Ok(Exit::Success)
 }
 
 /// Version of the hook state format.
 const STATE_VERSION: u64 = 1;
 
+/// Blocked reason after `deactivate`: the project here stays unloaded until
+/// the shell leaves it.
+const DEACTIVATED: &str = "deactivated";
+
 /// What the hook remembers between prompts, in a shell variable. Never
 /// holds values.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct State {
-    /// Canonical project directory.
-    dir: String,
-    /// SHA-256 of `smart-env.toml` (hex).
-    hash: String,
+pub(crate) struct State {
+    /// Canonical project directory (empty for `activate`).
+    pub dir: String,
+    /// SHA-256 of `smart-env.toml` (hex; empty for `activate`).
+    pub hash: String,
     /// `project/environment`, for messages.
-    label: String,
-    kind: StateKind,
+    pub label: String,
+    pub kind: StateKind,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum StateKind {
+pub(crate) enum StateKind {
     /// Variables exported.
     Active {
         env: EnvironmentId,
         revision: u64,
+        /// `smart-env activate`: stays until `deactivate`, whatever the
+        /// directory.
+        manual: bool,
         /// Exported names with the secret and version behind each.
         vars: Vec<(String, KeyId, u32)>,
     },
@@ -140,7 +220,8 @@ enum StateKind {
 }
 
 impl State {
-    fn parse(text: &str) -> Option<Self> {
+    /// The state the shell holds; `None` for none, empty or damaged.
+    pub(crate) fn parse(text: &str) -> Option<Self> {
         let value: Value = serde_json::from_str(text).ok()?;
         if value["v"].as_u64()? != STATE_VERSION {
             return None;
@@ -150,6 +231,7 @@ impl State {
             "active" => StateKind::Active {
                 env: value["env"].as_str()?.parse().ok()?,
                 revision: value["revision"].as_u64()?,
+                manual: value["manual"].as_bool().unwrap_or(false),
                 vars: value["vars"]
                     .as_array()?
                     .iter()
@@ -186,11 +268,13 @@ impl State {
             StateKind::Active {
                 env,
                 revision,
+                manual,
                 vars,
             } => {
                 value["status"] = json!("active");
                 value["env"] = json!(env.to_string());
                 value["revision"] = json!(revision);
+                value["manual"] = json!(manual);
                 value["vars"] = vars
                     .iter()
                     .map(|(name, key, version)| json!([name, key.to_string(), version]))
@@ -210,19 +294,23 @@ impl State {
             StateKind::Blocked { .. } => &[],
         }
     }
+
+    fn is_manual(&self) -> bool {
+        matches!(self.kind, StateKind::Active { manual: true, .. })
+    }
 }
 
 /// The nearest `smart-env.toml`: its directory, bytes and hash.
-struct Found {
-    dir: PathBuf,
-    bytes: Vec<u8>,
-    hash: [u8; 32],
+pub(crate) struct Found {
+    pub dir: PathBuf,
+    pub bytes: Vec<u8>,
+    pub hash: [u8; 32],
 }
 
 impl Found {
     /// Like `ProjectFile::find`, but also for a file that does not parse
     /// (reported once, keyed by its hash).
-    fn nearest(start: &Path) -> Option<Self> {
+    pub(crate) fn nearest(start: &Path) -> Option<Self> {
         let start = std::path::absolute(start).ok()?;
         let path = start
             .ancestors()
@@ -240,6 +328,14 @@ impl Found {
             self.hash.iter().map(|byte| format!("{byte:02x}")).collect(),
         )
     }
+
+    /// The parsed `smart-env.toml`.
+    pub(crate) fn file(&self) -> Result<ProjectFile, CliError> {
+        std::str::from_utf8(&self.bytes)
+            .map_err(|_| ProjectFileError::Syntax { line: None })
+            .and_then(ProjectFile::parse)
+            .map_err(CliError::from)
+    }
 }
 
 /// One prompt's output.
@@ -250,21 +346,58 @@ struct Step {
 }
 
 impl Step {
+    fn new(shell: Shell) -> Self {
+        Self {
+            shell,
+            code: String::new(),
+            messages: Vec::new(),
+        }
+    }
+
+    fn write(&self, out: &mut dyn Write, err: &mut dyn Write) {
+        let _ = out.write_all(self.code.as_bytes());
+        for message in &self.messages {
+            let _ = writeln!(err, "smart-env: {message}");
+        }
+    }
+
     fn run(&mut self, ctx: &Context<'_>, previous: Option<&State>) {
+        let Some(data) = ctx.data.clone().filter(|data| data.vault_db().exists()) else {
+            self.leave(previous);
+            return;
+        };
+        // `activate` sticks until `deactivate`, whatever the directory.
+        if let Some(state) = previous.filter(|state| state.is_manual()) {
+            self.refresh_manual(ctx, &data, state);
+            return;
+        }
+        let auto = data
+            .state()
+            .ok()
+            .and_then(|state| state.auto_activate().ok())
+            .unwrap_or(true);
         let found = ctx.current_dir.as_deref().and_then(Found::nearest);
-        let data = ctx.data.clone().filter(|data| data.vault_db().exists());
-        let (Some(found), Some(data)) = (found, data) else {
+        let Some(found) = found.filter(|_| auto) else {
             self.leave(previous);
             return;
         };
         let (dir, hash) = found.key();
+        let here = |state: &&State| state.dir == dir && state.hash == hash;
+
+        // After `deactivate`: this project stays unloaded until the shell
+        // leaves it.
+        if previous.filter(here).is_some_and(
+            |state| matches!(&state.kind, StateKind::Blocked { reason } if reason == DEACTIVATED),
+        ) {
+            return;
+        }
 
         // Fast path: same file, same environment revision. No key, no
         // decryption.
         if let Some(State {
             kind: StateKind::Active { env, revision, .. },
             ..
-        }) = previous.filter(|state| state.dir == dir && state.hash == hash)
+        }) = previous.filter(here)
             && Vault::open(data.vault_db())
                 .and_then(|vault| vault.revision(*env))
                 .is_ok_and(|current| current == *revision)
@@ -283,6 +416,7 @@ impl Step {
                         kind: StateKind::Active {
                             env,
                             revision,
+                            manual: false,
                             vars: Vec::new(),
                         },
                     },
@@ -318,7 +452,42 @@ impl Step {
         }
     }
 
-    /// Leaves whatever was loaded (no project here, or not set up).
+    /// A manual activation follows changes from another tab; anything that
+    /// fails (locked key, removed environment) keeps what is loaded.
+    fn refresh_manual(&mut self, ctx: &Context<'_>, data: &DataPaths, state: &State) {
+        let StateKind::Active { env, revision, .. } = state.kind else {
+            return;
+        };
+        let Ok(vault) = Vault::open(data.vault_db()) else {
+            return;
+        };
+        if vault.revision(env).is_ok_and(|current| current == revision) {
+            return;
+        }
+        let Ok(key) = device_key(ctx) else { return };
+        let consents = data.state().ok();
+        let mut step = Self::new(self.shell);
+        if let Ok((revision, loaded)) = step.decrypt(&vault, env, &key, consents.as_ref()) {
+            step.activate(
+                Some(state),
+                State {
+                    kind: StateKind::Active {
+                        env,
+                        revision,
+                        manual: true,
+                        vars: Vec::new(),
+                    },
+                    ..state.clone()
+                },
+                loaded,
+            );
+            self.code.push_str(&step.code);
+            self.messages.extend(step.messages);
+        }
+    }
+
+    /// Leaves whatever was loaded (no project here, auto-activation off, or
+    /// not set up).
     fn leave(&mut self, previous: Option<&State>) {
         let Some(previous) = previous else { return };
         if matches!(previous.kind, StateKind::Active { .. }) {
@@ -350,10 +519,9 @@ impl Step {
             reason: reason.to_owned(),
             message: Some(message),
         };
-        let file = std::str::from_utf8(&found.bytes)
-            .map_err(|_| crate::project_file::ProjectFileError::Syntax { line: None })
-            .and_then(ProjectFile::parse)
-            .map_err(|e| error("", "invalid", CliError::from(e).message().to_owned()))?;
+        let file = found
+            .file()
+            .map_err(|e| error("", "invalid", e.message().to_owned()))?;
         let label = format!("{}/{}", file.project, file.environment);
 
         let state = data.state().ok();
@@ -416,10 +584,24 @@ impl Step {
                 )
             }
         })?;
-        let revision = vault.revision(env).map_err(|e| failed(&label, e.into()))?;
-        let variables = vault
-            .read_all(env, &key)
-            .map_err(|e| failed(&label, e.into()))?;
+        let (revision, loaded) = self
+            .decrypt(&vault, env, &key, state.as_ref())
+            .map_err(|e| failed(&label, e))?;
+        Ok((label, env, revision, loaded))
+    }
+
+    /// Decrypts the environment and picks what reaches the shell: never
+    /// `inject = run`, reserved names only with consent for their current
+    /// value (reported here).
+    fn decrypt(
+        &mut self,
+        vault: &Vault,
+        env: EnvironmentId,
+        key: &DeviceKey,
+        consents: Option<&StateStore>,
+    ) -> Result<(u64, Vec<Loaded>), CliError> {
+        let revision = vault.revision(env)?;
+        let variables = vault.read_all(env, key)?;
 
         let mut loaded = Vec::new();
         let mut skipped = Vec::new();
@@ -430,7 +612,7 @@ impl Step {
             }
             let name = meta.name.as_str().to_owned();
             if is_reserved(&name) {
-                match consent(state.as_ref(), env, &meta) {
+                match consent(consents, env, &meta) {
                     Consent::Current => {}
                     Consent::Stale => {
                         changed.push(name);
@@ -464,7 +646,7 @@ impl Step {
                 "{name} changed since you allowed it and was not loaded. Allow the new value with: smart-env allow --var {name}"
             ));
         }
-        Ok((label, env, revision, loaded))
+        Ok((revision, loaded))
     }
 
     /// Restores the previous variables, exports the new ones, reports.

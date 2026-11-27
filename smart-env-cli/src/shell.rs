@@ -97,6 +97,8 @@ impl Shell {
 }
 
 /// Runs first in `PROMPT_COMMAND`; keeps `$?` for the user's prompt. The
+/// `smart-env` function runs `activate` / `deactivate` in this shell and
+/// passes the state to every other command (for `status`). The
 /// state goes to `hook-env` for that one call only, never exported. Saved
 /// values stay in the shell. Locals have long names: `eval` must not hit a
 /// project variable with the same name.
@@ -120,6 +122,20 @@ _smart_env_restore() {
   elif [[ -n "${!_smart_env_u+x}" ]]; then
     unset "$1" "$_smart_env_u"
   fi
+}
+smart-env() {
+  case "${1-}" in
+    activate|deactivate)
+      local _smart_env_out _smart_env_rc
+      _smart_env_out="$(SMART_ENV_HOOK_STATE="${_smart_env_state-}" @SMART_ENV@ hook-env bash --"$1" "${@:2}")"
+      _smart_env_rc=$?
+      eval "$_smart_env_out"
+      return $_smart_env_rc
+      ;;
+    *)
+      SMART_ENV_HOOK_STATE="${_smart_env_state-}" @SMART_ENV@ "$@"
+      ;;
+  esac
 }
 if [[ ";${PROMPT_COMMAND:-};" != *";_smart_env_hook;"* ]]; then
   PROMPT_COMMAND="_smart_env_hook${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
@@ -147,6 +163,20 @@ _smart_env_restore() {
   elif (( ${+parameters[$_smart_env_u]} )); then
     unset "$1" "$_smart_env_u"
   fi
+}
+smart-env() {
+  case "${1-}" in
+    activate|deactivate)
+      local _smart_env_out _smart_env_rc
+      _smart_env_out="$(SMART_ENV_HOOK_STATE="${_smart_env_state-}" @SMART_ENV@ hook-env zsh --"$1" "${@:2}")"
+      _smart_env_rc=$?
+      eval "$_smart_env_out"
+      return $_smart_env_rc
+      ;;
+    *)
+      SMART_ENV_HOOK_STATE="${_smart_env_state-}" @SMART_ENV@ "$@"
+      ;;
+  esac
 }
 typeset -ag precmd_functions chpwd_functions
 if (( ! ${precmd_functions[(I)_smart_env_hook]} )); then
@@ -181,6 +211,19 @@ function _smart_env_restore
     else if set -q $_smart_env_u
         set -e $argv[1]
         set -e $_smart_env_u
+    end
+end
+function smart-env
+    switch "$argv[1]"
+        case activate deactivate
+            set -l _smart_env_args $argv
+            set -e _smart_env_args[1]
+            set -l _smart_env_out (SMART_ENV_HOOK_STATE="$_smart_env_state" @SMART_ENV@ hook-env fish --$argv[1] $_smart_env_args)
+            set -l _smart_env_rc $status
+            string join \n -- $_smart_env_out | source
+            return $_smart_env_rc
+        case '*'
+            SMART_ENV_HOOK_STATE="$_smart_env_state" @SMART_ENV@ $argv
     end
 end
 "#;

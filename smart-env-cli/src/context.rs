@@ -52,6 +52,8 @@ impl ChildCommand {
     /// rest of the environment.
     pub fn to_command(&self) -> std::process::Command {
         let mut command = std::process::Command::new(&self.program);
+        // The hook's state is for smart-env, not for the command.
+        command.env_remove("SMART_ENV_HOOK_STATE");
         command.args(&self.args).envs(
             self.env
                 .iter()
@@ -125,7 +127,9 @@ pub struct Context<'a> {
     /// path; `None` if the system cannot tell.
     pub executable: Option<PathBuf>,
     /// The shell hook's state from the previous prompt
-    /// (`SMART_ENV_HOOK_STATE`, set by the hook for `hook-env` only).
+    /// (`SMART_ENV_HOOK_STATE`, set by the hook and the `smart-env` shell
+    /// function); `None` when neither is loaded, empty when nothing is
+    /// active.
     pub hook_state: Option<String>,
 }
 
@@ -163,9 +167,8 @@ impl System {
                 .then_some(StdTerminal),
             shell: ShellEnv::detect(),
             executable: std::env::current_exe().ok(),
-            hook_state: std::env::var("SMART_ENV_HOOK_STATE")
-                .ok()
-                .filter(|state| !state.is_empty()),
+            // Empty: the hook is loaded and nothing is active.
+            hook_state: std::env::var("SMART_ENV_HOOK_STATE").ok(),
         }
     }
 

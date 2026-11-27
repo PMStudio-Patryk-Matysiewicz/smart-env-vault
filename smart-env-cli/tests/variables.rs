@@ -358,7 +358,7 @@ fn set_reserved_name_is_saved_with_a_warning() {
     );
     assert!(
         run.stdout.contains(
-            "! NODE_OPTIONS is a reserved name. The shell hook skips it until allowed: smart-env allow --var NODE_OPTIONS"
+            "! NODE_OPTIONS is a reserved name: smart-env run and the shell hook skip it until allowed: smart-env allow --var NODE_OPTIONS"
         ),
         "{}",
         run.stdout
@@ -844,7 +844,7 @@ fn rename_to_a_reserved_name_warns() {
 
     assert!(
         run.stdout.contains(
-            "! GIT_TOKEN is a reserved name. The shell hook skips it until allowed: smart-env allow --var GIT_TOKEN"
+            "! GIT_TOKEN is a reserved name: smart-env run and the shell hook skip it until allowed: smart-env allow --var GIT_TOKEN"
         ),
         "{}",
         run.stdout

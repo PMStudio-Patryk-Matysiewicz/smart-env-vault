@@ -1,6 +1,11 @@
 //! Reserved variable names (ADR-005): variables that change how tools behave
 //! rather than the application. The shell hook and `run` skip them until
-//! allowed on this device; `init` warns about them.
+//! allowed on this device (`smart-env allow --var`); `init` and `set` warn
+//! about them.
+
+use std::io::Write;
+
+use crate::{CliError, Context, EnvRef, Exit};
 
 /// Whether `name` is reserved: an exact name from the ADR-005 list or a
 /// reserved prefix (`DYLD_`, `GIT_`, `SMART_ENV_`), ignoring case.
@@ -50,6 +55,32 @@ const EXACT: &[&str] = &[
 
 /// Reserved prefixes from ADR-005, upper case.
 const PREFIXES: &[&str] = &["DYLD_", "GIT_", "SMART_ENV_"];
+
+/// `smart-env allow --var NAME`: shows the value on the terminal and, after
+/// a "yes", lets `run` (and later the hook) pass this reserved name at its
+/// current version.
+pub(crate) fn allow_var(
+    ctx: &mut Context<'_>,
+    json: bool,
+    env: Option<&EnvRef>,
+    name: &str,
+    out: &mut dyn Write,
+) -> Result<Exit, CliError> {
+    let _ = (ctx, json, env, name, out);
+    todo!("allow_var")
+}
+
+/// `smart-env deny --var NAME`: stops passing a reserved name.
+pub(crate) fn deny_var(
+    ctx: &mut Context<'_>,
+    json: bool,
+    env: Option<&EnvRef>,
+    name: &str,
+    out: &mut dyn Write,
+) -> Result<Exit, CliError> {
+    let _ = (ctx, json, env, name, out);
+    todo!("deny_var")
+}
 
 #[cfg(test)]
 mod tests {

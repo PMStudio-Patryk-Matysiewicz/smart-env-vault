@@ -5,8 +5,8 @@ use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::{
-    CliError, Context, EnvRef, Exit, Interaction, Shell, hook, init, lock, run, setup, trust,
-    variables,
+    CliError, Context, EnvRef, Exit, Interaction, Shell, hook, init, lock, reserved, run, setup,
+    trust, variables,
 };
 
 /// `smart-env` command line.
@@ -110,15 +110,23 @@ pub enum Command {
     Unlock,
     /// Forget the unlocked key.
     Lock,
-    /// Let the shell hook load this project here (until smart-env.toml changes).
+    /// Let the shell hook load this project here (until smart-env.toml changes),
+    /// or pass a variable with a reserved name (--var).
     Allow {
         /// Project directory (default: the current one).
         dir: Option<std::path::PathBuf>,
+        /// Reserved name to pass (shows its value and asks).
+        #[arg(long, value_name = "NAME", conflicts_with = "dir")]
+        var: Option<String>,
     },
-    /// Never let the shell hook load this project here.
+    /// Never let the shell hook load this project here, or stop passing a
+    /// reserved name (--var).
     Deny {
         /// Project directory (default: the current one).
         dir: Option<std::path::PathBuf>,
+        /// Reserved name to stop passing.
+        #[arg(long, value_name = "NAME", conflicts_with = "dir")]
+        var: Option<String>,
     },
     /// Shell integration script; `setup` adds it to the shell's startup file.
     Hook {
@@ -244,8 +252,14 @@ fn dispatch(
         } => run::run(ctx, env, only, except, command, err),
         Command::Unlock => lock::unlock(ctx, json, out),
         Command::Lock => lock::lock(ctx, json, out),
-        Command::Allow { dir } => trust::allow(ctx, json, dir.as_deref(), out),
-        Command::Deny { dir } => trust::deny(ctx, json, dir.as_deref(), out),
+        Command::Allow {
+            var: Some(name), ..
+        } => reserved::allow_var(ctx, json, env, name, out),
+        Command::Allow { dir, var: None } => trust::allow(ctx, json, dir.as_deref(), out),
+        Command::Deny {
+            var: Some(name), ..
+        } => reserved::deny_var(ctx, json, env, name, out),
+        Command::Deny { dir, var: None } => trust::deny(ctx, json, dir.as_deref(), out),
         Command::Hook { shell } => hook::hook(ctx, *shell, out),
         Command::HookEnv { shell } => Ok(hook::hook_env(ctx, *shell, out, err)),
     }

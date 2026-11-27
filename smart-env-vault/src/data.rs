@@ -1,4 +1,4 @@
-use crate::{ProjectId, Vault, VaultError};
+use crate::{EnvironmentId, KeyId, ProjectId, VarName, Vault, VaultError};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, ffi};
 use std::{
     fs::{OpenOptions, create_dir_all, remove_file},
@@ -158,6 +158,16 @@ impl DataPaths {
     }
 }
 
+/// Consent to pass a variable with a reserved name (ADR-005): exactly this
+/// secret at exactly this version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VarConsent {
+    /// Stable identity of the secret.
+    pub key_id: KeyId,
+    /// Version of the value the user saw and allowed.
+    pub version: u32,
+}
+
 /// What the user decided about loading a project directory in the shell
 /// hook (`smart-env allow` / `deny`), on this device.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -295,6 +305,48 @@ impl StateStore {
             rusqlite::params![path_key(dir), kind, file_hash, project_id, now],
         )?;
         Ok(())
+    }
+}
+
+impl StateStore {
+    /// Consent for variable `name` in environment `env`, if any.
+    ///
+    /// # Errors
+    /// Storage errors.
+    pub fn var_consent(
+        &self,
+        env: EnvironmentId,
+        name: &VarName,
+    ) -> Result<Option<VarConsent>, DataPathsError> {
+        let _ = (env, name);
+        todo!("StateStore::var_consent")
+    }
+
+    /// Stores `consent` for `name` in `env`, replacing an earlier one.
+    ///
+    /// # Errors
+    /// Storage errors.
+    pub fn set_var_consent(
+        &self,
+        env: EnvironmentId,
+        name: &VarName,
+        consent: &VarConsent,
+    ) -> Result<(), DataPathsError> {
+        let _ = (env, name, consent);
+        todo!("StateStore::set_var_consent")
+    }
+
+    /// Removes the consent for `name` in `env`; returns whether there was one.
+    ///
+    /// # Errors
+    /// Storage errors.
+    pub fn remove_var_consent(
+        &self,
+        env: EnvironmentId,
+        name: &VarName,
+    ) -> Result<bool, DataPathsError> {
+        let _ = (env, name);
+        todo!("StateStore::remove_var_consent")
     }
 }
 

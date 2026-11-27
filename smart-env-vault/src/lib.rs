@@ -21,7 +21,7 @@ mod secret;
 mod store;
 mod vault;
 
-pub use data::{DataPaths, DataPathsError, StateStore, TrustDecision};
+pub use data::{DataPaths, DataPathsError, StateStore, TrustDecision, VarConsent};
 pub use dek::{Dek, Unwrapper, WrappedDek};
 pub use device::{DeviceKey, PublicKey, SigningPublicKey};
 pub use error::KeyError;

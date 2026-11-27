@@ -163,3 +163,110 @@ fn state_from_a_newer_version_is_refused() {
         Err(DataPathsError::UnsupportedState)
     ));
 }
+
+// --- state: consent for reserved names (allow --var) ---
+
+use smart_env_vault::{EnvironmentId, KeyId, VarConsent, VarName};
+
+fn var(name: &str) -> VarName {
+    VarName::parse(name).unwrap()
+}
+
+#[test]
+fn var_consent_is_stored_per_environment_and_name() {
+    let temp = TempDir::new().unwrap();
+    let state = DataPaths::from_root(temp.path().join("smart-env"))
+        .state()
+        .unwrap();
+    let (dev, prod) = (EnvironmentId::new(), EnvironmentId::new());
+    let consent = VarConsent {
+        key_id: KeyId::new(),
+        version: 3,
+    };
+
+    assert_eq!(state.var_consent(dev, &var("NODE_OPTIONS")).unwrap(), None);
+    state
+        .set_var_consent(dev, &var("NODE_OPTIONS"), &consent)
+        .unwrap();
+
+    assert_eq!(
+        state.var_consent(dev, &var("NODE_OPTIONS")).unwrap(),
+        Some(consent)
+    );
+    assert_eq!(state.var_consent(prod, &var("NODE_OPTIONS")).unwrap(), None);
+    assert_eq!(state.var_consent(dev, &var("PATH")).unwrap(), None);
+}
+
+#[test]
+fn var_consent_is_replaced_and_removed() {
+    let temp = TempDir::new().unwrap();
+    let paths = DataPaths::from_root(temp.path().join("smart-env"));
+    let state = paths.state().unwrap();
+    let env = EnvironmentId::new();
+    let name = var("NODE_OPTIONS");
+    let key_id = KeyId::new();
+
+    state
+        .set_var_consent(env, &name, &VarConsent { key_id, version: 1 })
+        .unwrap();
+    state
+        .set_var_consent(env, &name, &VarConsent { key_id, version: 2 })
+        .unwrap();
+    assert_eq!(
+        paths.state().unwrap().var_consent(env, &name).unwrap(),
+        Some(VarConsent { key_id, version: 2 })
+    );
+
+    assert!(state.remove_var_consent(env, &name).unwrap());
+    assert_eq!(state.var_consent(env, &name).unwrap(), None);
+    assert!(!state.remove_var_consent(env, &name).unwrap());
+}
+
+#[test]
+fn state_schema_1_is_upgraded_to_hold_var_consent() {
+    let temp = TempDir::new().unwrap();
+    let paths = DataPaths::from_root(temp.path().join("smart-env"));
+    state_v1(paths.state_db());
+
+    let state = paths.state().unwrap();
+    let env = EnvironmentId::new();
+    let consent = VarConsent {
+        key_id: KeyId::new(),
+        version: 1,
+    };
+    state.set_var_consent(env, &var("PATH"), &consent).unwrap();
+    assert_eq!(state.var_consent(env, &var("PATH")).unwrap(), Some(consent));
+}
+
+#[test]
+fn state_schema_2_is_upgraded_keeping_directory_decisions() {
+    let temp = TempDir::new().unwrap();
+    let paths = DataPaths::from_root(temp.path().join("smart-env"));
+    std::fs::create_dir_all(paths.directory()).unwrap();
+    {
+        // Schema 2 as the allow / deny item wrote it.
+        let conn = rusqlite::Connection::open(paths.state_db()).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE trust (
+                path BLOB PRIMARY KEY,
+                decision TEXT NOT NULL CHECK (decision IN ('allow', 'deny')),
+                file_hash BLOB CHECK (file_hash IS NULL OR length(file_hash) = 32),
+                project_id TEXT,
+                decided_at INTEGER NOT NULL,
+                CHECK ((decision = 'allow') = (file_hash IS NOT NULL AND project_id IS NOT NULL))
+            ) STRICT;
+            INSERT INTO trust (path, decision, decided_at) VALUES (CAST('/code/x' AS BLOB), 'deny', 0);
+            PRAGMA user_version = 2;",
+        )
+        .unwrap();
+    }
+
+    let state = paths.state().unwrap();
+
+    assert_eq!(
+        state.trust(Path::new("/code/x")).unwrap(),
+        Some(TrustDecision::Denied)
+    );
+    let env = EnvironmentId::new();
+    assert_eq!(state.var_consent(env, &var("PATH")).unwrap(), None);
+}

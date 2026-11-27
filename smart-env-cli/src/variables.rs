@@ -575,7 +575,7 @@ fn renamed_hint(
 
 /// ` --env <as typed>` when `--env` was given, for hints that repeat a
 /// command.
-fn env_flag(env: Option<&EnvRef>) -> String {
+pub(crate) fn env_flag(env: Option<&EnvRef>) -> String {
     env.map_or_else(String::new, |env| match &env.project {
         Some(project) => format!(" --env {project}/{}", env.environment),
         None => format!(" --env {}", env.environment),

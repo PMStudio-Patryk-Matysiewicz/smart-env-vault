@@ -31,7 +31,7 @@ impl Exit {
             Self::Access => 3,
             Self::NotFound => 4,
             Self::Conflict => 5,
-            Self::Child(_) => todo!(),
+            Self::Child(code) => code,
         }
     }
 }

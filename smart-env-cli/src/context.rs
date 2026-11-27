@@ -49,8 +49,13 @@ impl ChildCommand {
     /// The [`std::process::Command`] that starts it, inheriting stdio and the
     /// rest of the environment.
     pub fn to_command(&self) -> std::process::Command {
-        let _ = self.env.first().map(|(_, value)| value.expose_secret());
-        todo!()
+        let mut command = std::process::Command::new(&self.program);
+        command.args(&self.args).envs(
+            self.env
+                .iter()
+                .map(|(name, value)| (name, value.expose_secret())),
+        );
+        command
     }
 }
 
@@ -70,8 +75,22 @@ pub trait Runner {
 pub struct ProcessRunner;
 
 impl Runner for ProcessRunner {
-    fn run(&mut self, _command: ChildCommand) -> io::Result<u8> {
-        todo!()
+    #[cfg(unix)]
+    fn run(&mut self, command: ChildCommand) -> io::Result<u8> {
+        use std::os::unix::process::CommandExt;
+        let _ = io::stdout().flush();
+        let _ = io::stderr().flush();
+        // Returns only if the command could not be started.
+        Err(command.to_command().exec())
+    }
+
+    #[cfg(not(unix))]
+    fn run(&mut self, command: ChildCommand) -> io::Result<u8> {
+        let status = command.to_command().status()?;
+        Ok(status
+            .code()
+            .and_then(|code| u8::try_from(code).ok())
+            .unwrap_or(1))
     }
 }
 

@@ -3,7 +3,7 @@ name = "smart-env-cli"
 version = "0.1.0"
 edition = "2024"
 license = "FSL-1.1-ALv2"
-
+repository = "https://github.com/PMStudio-Patryk-Matysiewicz/smart-env-vault"
 [lib]
 name = "smart_env_cli"
 path = "src/lib.rs"
